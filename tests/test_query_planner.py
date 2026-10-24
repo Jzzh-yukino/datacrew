@@ -4,12 +4,12 @@ from app.agents.query_planner import build_query_plan_hint
 
 def test_多维分组():
     hint = build_query_plan_hint("各城市各渠道的订单量")
-    assert hint and "GROUP BY 维度1, 维度2" in hint
+    assert hint and "GROUP BY u.city, o.channel" in hint and "ORDER BY cnt DESC" in hint
 
 
 def test_topN热销():
     hint = build_query_plan_hint("母婴亲子品类 Top10 热销商品")
-    assert hint and "LIMIT 10" in hint and "products.category" in hint
+    assert hint and "LIMIT 10" in hint and "三列" in hint
 
 
 def test_占比条件聚合():
