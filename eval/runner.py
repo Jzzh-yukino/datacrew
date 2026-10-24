@@ -419,14 +419,25 @@ def write_jsonl(path: Path, records: list[dict], meta: dict) -> None:
             f.write(json.dumps({"type": "item", **r}, ensure_ascii=False) + NL)
 
 
-async def run_one(q: dict, idx: int) -> dict:
-    """跑一条评测，返回判定记录（含诊断证据）。"""
+async def run_one(q: dict, idx: int, timeout_s: float = 180.0) -> dict:
+    """跑一条评测，返回判定记录（含诊断证据）。
+
+    单题超时（DC-9 实际踩坑）：真实模式下网络代理可能把单条 LLM 请求挂住
+    40+ 分钟，整个全量评测卡死且无中间结果。评测 runner 必须有 per-question
+    上限——超时记录为 error 继续下一题，**一条题不能毁掉整轮证据**。
+    """
     session_id = f"eval-r{idx}"
     t0 = time.perf_counter()
     events: list[dict] = []
     try:
-        async for ev in ask(q["question"], session_id):
-            events.append(ev)
+        async with asyncio.timeout(timeout_s):
+            async for ev in ask(q["question"], session_id):
+                events.append(ev)
+    except TimeoutError:
+        events.append({
+            "event": "error",
+            "message": f"单题超时（>{int(timeout_s)}s）",
+        })
     except Exception as e:  # runner 不因单条崩溃而中断
         events.append({"event": "error", "message": str(e)})
     latency_ms = int((time.perf_counter() - t0) * 1000)
@@ -437,6 +448,8 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--category", default="")
+    parser.add_argument("--timeout", type=float, default=180.0,
+                        help="单题超时秒数（真实模式网络挂起保护）")
     args = parser.parse_args()
 
     await init_pools()
@@ -454,10 +467,14 @@ async def main() -> None:
 
     records: list[dict] = []
     for i, q in enumerate(queries, 1):
-        r = await run_one(q, i)
+        r = await run_one(q, i, timeout_s=args.timeout)
         records.append(r)
         mark = "✓" if r["passed"] else "✗"
-        print(f"  {mark} [{r['category']}] {r['question'][:26]} ({r['latency_ms']}ms) {r['reason'][:30]}")
+        print(
+            f"  {mark} [{r['category']}] {q['question'][:26]} "
+            f"({r['latency_ms']}ms) {r['reason'][:30]}",
+            flush=True,
+        )
 
     total = len(records)
     passed = sum(1 for r in records if r["passed"])

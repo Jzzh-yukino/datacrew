@@ -235,3 +235,23 @@ def test_报告包含自愈分布表():
     assert "| 列不存在 | 1 | 2 | 1 | 100% |" in text
     assert "合计：1/1 题触发自愈，其中 1 题最终通过" in text
 
+
+async def test_单题超时不会挂死整轮(monkeypatch):
+    """DC-9 实际踩坑：真实模式代理把单条 LLM 请求挂住 40+ 分钟，全量卡死。
+
+    per-question timeout 把"一条题"的故障隔离成一条 error 记录，整轮继续。
+    """
+    import asyncio
+
+    from eval.runner import run_one
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(10)
+        yield {"event": "result"}
+
+    monkeypatch.setattr("eval.runner.ask", hang)
+    rec = await run_one(_q(), 1, timeout_s=0.05)
+    assert rec["status"] == "failed"
+    assert "超时" in (rec["error"] or "")
+    assert rec["passed"] is False
+
