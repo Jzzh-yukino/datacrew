@@ -229,6 +229,31 @@ async def _data_as_of() -> str:
         return _dt.date.today().isoformat()
 
 
+# 数据时间范围（min/max，按下单时间）进程内缓存：60s 足够新鲜，省掉每次生成
+# （含自愈重试）都查一次库；DDL/重灌数据 60s 内自然过期。
+_DATA_BOUNDS_TTL_S = 60.0
+_data_bounds_cache: tuple[str, str, float] | None = None
+
+
+async def _data_bounds() -> tuple[str, str]:
+    """数据时间范围 (最早, 最晚) 的 created_at 日期；失败返回 ("", "")。"""
+    global _data_bounds_cache
+    now = time.monotonic()
+    if _data_bounds_cache and _data_bounds_cache[2] > now:
+        return _data_bounds_cache[0], _data_bounds_cache[1]
+    try:
+        async with admin_pool().acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT min(created_at)::date AS lo, max(created_at)::date AS hi FROM biz.orders"
+            )
+        lo, hi = str(row["lo"]), str(row["hi"])
+    except Exception as e:
+        log.warning("data_bounds.fallback", extra={"context": {"reason": str(e)[:100]}})
+        return "", ""
+    _data_bounds_cache = (lo, hi, now + _DATA_BOUNDS_TTL_S)
+    return lo, hi
+
+
 # ---------------------------------------------------------------- SchemaCurator
 async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     """检索相关表+指标口径；发现口径歧义时 interrupt 向用户追问。"""
@@ -430,11 +455,23 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     system_prompt = render(SQL_GENERATOR_SYSTEM, schema_context=schema_ctx)
     as_of = state.get("data_as_of") or ""
     if as_of:
+        data_start, _ = await _data_bounds()
+        # DC-6：时间口径逐条写死可判定的规则。事故根因不是模型不聪明，而是
+        # "双11"该取哪一年、"最近7天"的边界、"上个月"按系统今天还是数据截止日
+        # ——这些是**组织约定**，模型推不出来，必须在提示词里给公式。
         system_prompt += (
-            f"\n数据统计截止日：{as_of}。"
-            "昨天/最近N天/上个月等相对时间一律按数据截止日推算，"
-            f"（如昨天= {as_of} 前一天）。"
-            "问题没提时间范围时，WHERE 禁止出现任何时间条件——默认全量统计。"
+            f"\n【时间口径（逐条遵守）】\n"
+            f"- 数据范围：{data_start or '未知'} 至 {as_of}（时间字段为下单时间 created_at）。\n"
+            "- 统计周期一律用 created_at（下单时间）；只有问题明确问“支付时间”才用 pay_time。\n"
+            "- 相对时间按**数据截止日**推算，不是系统今天："
+            f"昨天 = {as_of} 的前一天；最近 N 天 = created_at >= {as_of} 减 N 天（含截止日）；"
+            f"上个月 = {as_of} 所在月的上一个整月；本月至今 = {as_of} 所在月 1 日到截止日。\n"
+            "- 未写年份的日历事件（双11/双12/618/元旦/春节）取**数据范围内最近一次**"
+            "（数据截止日之前），不要用系统当前年份。\n"
+            "- “大促期间” = 双11 大促窗口：11-10 至 11-12"
+            "（created_at >= '11-10' AND < '11-13'）。\n"
+            "- “某天所在那一周” = 从该天起 7 天（含当天）。\n"
+            "- 问题没提时间范围时，WHERE 禁止出现任何时间条件——默认全量统计。"
         )
     if state.get("last_error"):
         # 自愈模式：把执行错误回灌，让 LLM 修正
