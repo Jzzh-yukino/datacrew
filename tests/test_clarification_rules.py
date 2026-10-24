@@ -54,7 +54,7 @@ class TestDerivedRules:
         [
             ("这个月的销售额是多少", "销售额"),
             ("这个月的用户数是多少", "用户数"),
-            ("双 11 的转化率是多少", "转化率"),
+            ("这个月的转化率是多少", "转化率"),
         ],
     )
     def test_歧义问题命中(self, question: str, term: str) -> None:

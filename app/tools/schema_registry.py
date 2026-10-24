@@ -201,7 +201,10 @@ def match_clarification_rule(
     # 分组/排名/占比类问法已给出维度或派生口径，规则不追问（旧版
     # grouped_is_qualified 的通用化）；歧义交给 LLM 补充判定。
     if _GROUPING_RE.search(q) or re.search(
-        r"(?:占比|比例|排名|最大|最小|前\s*\d+|Top|分布|趋势|贡献)", q, re.I
+        r"(?:占比|比例|排名|最大|最小|前\s*\d+|Top|分布|趋势|贡献"
+        r"|今天|昨天|最近|本月|上月|上个月|当天|周末|工作日"
+        r"|双11|双 11|618|国庆|季度|\d+\s*月)",
+        q, re.I,
     ):
         return None
     for rule in derive_clarification_rules(metrics):
