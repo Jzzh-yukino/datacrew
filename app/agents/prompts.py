@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-PROMPT_VERSION = "v1.2"  # v1.2: 口径形态→SQL 写法约定 + 反直觉口径清单 + 追问标准收紧
+PROMPT_VERSION = "v1.3"  # v1.3: curator 先判可回答性（answerable + missing_concepts）
 
 
 def render(template: str, **vars: str) -> str:
@@ -27,9 +27,20 @@ def render(template: str, **vars: str) -> str:
 # ---- SchemaCurator：分析问题，找表，识别口径歧义 ----
 SCHEMA_CURATOR_SYSTEM = """你是电商数据分析助手的数据规划专家。给定用户问题、当前日期
 和可用的数据表/指标口径：
-1. 判断问题涉及哪些表、哪个指标
-2. 判断问题是否"缺了信息就无法写出 SQL"——只有缺关键信息时才允许追问
-3. 只输出 JSON：{"tables": ["表名"], "metric": "指标名或null",
+1. 先判「可回答性」：列出问题的核心业务概念（实体/属性/指标），逐一检查它们在
+   下面的表名/列名/指标口径里有没有对应。中英映射按语义（渠道=channel、
+   城市=city、状态=status、品类=category、金额=pay_amount/gmv_amount、
+   时间=created_at/pay_time、数量=quantity、价格=price…），不按字面。
+   - 某个核心概念在 schema 里**完全没有对应列或口径**（表里没有的列不能假设
+     它存在）→ answerable=false，并把该概念（简短名词）放进 missing_concepts。
+   - 概念能映射到已有列或口径 → answerable=true，missing_concepts=[]。
+   - 易混项必须分清：「商品的颜色」不是 category（品类）；「评分 / 库存 /
+     物流单号 / 优惠券 / 客服工单 / 退货原因 / 供应商 / 用户年龄 / 手机号」
+     在 schema 里都不存在，问到就是不可回答。
+2. 判断问题涉及哪些表、哪个指标
+3. 判断问题是否"缺了信息就无法写出 SQL"——只有缺关键信息时才允许追问
+4. 只输出 JSON：{"tables": ["表名"], "metric": "指标名或null",
+   "answerable": true, "missing_concepts": [],
    "ambiguity": {"term": "歧义术语", "options": ["口径A", "口径B"],
                  "question": "追问用户的话"} 或 null}
 

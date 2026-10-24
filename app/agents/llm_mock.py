@@ -43,11 +43,28 @@ def mock_chat(messages: list[dict[str, str]], **_: Any) -> str:
 
 
 def _curator(question: str) -> str:
-    # SchemaCurator：问题含"销售额" -> 歧义；否则直接给表
+    # SchemaCurator：先判可回答性（schema 里没有的概念），再判歧义。
+    # 顺序与真实 prompt 一致：不可回答的问题连追问都没有意义。
+    absent = next(
+        (concept for keywords, concept in _ABSENT_CONCEPTS
+         if any(k in question for k in keywords)),
+        None,
+    )
+    if absent:
+        return json.dumps({
+            "tables": [],
+            "metric": None,
+            "answerable": False,
+            "missing_concepts": [absent],
+            "ambiguity": None,
+        }, ensure_ascii=False)
+    # 问题含"销售额" -> 歧义；否则直接给表
     if "销售额" in question:
         return json.dumps({
             "tables": ["orders"],
             "metric": None,
+            "answerable": True,
+            "missing_concepts": [],
             "ambiguity": {
                 "term": "销售额",
                 "options": [
@@ -58,9 +75,31 @@ def _curator(question: str) -> str:
             },
         }, ensure_ascii=False)
     if "订单" in question:
-        return json.dumps({"tables": ["orders"], "metric": "下单用户数", "ambiguity": None},
-                          ensure_ascii=False)
-    return json.dumps({"tables": ["orders"], "metric": None, "ambiguity": None}, ensure_ascii=False)
+        return json.dumps({
+            "tables": ["orders"], "metric": "下单用户数", "ambiguity": None,
+            "answerable": True, "missing_concepts": [],
+        }, ensure_ascii=False)
+    return json.dumps({
+        "tables": ["orders"], "metric": None, "ambiguity": None,
+        "answerable": True, "missing_concepts": [],
+    }, ensure_ascii=False)
+
+
+# 可回答性（DC-2）：schema 里没有的列/表——mock 模拟模型如实报告缺失概念。
+# 与 _HALLUCINATION_INTENTS 的触发词保持同一组，两条路径（curator 判不可回答 /
+# 退化成幻觉 SQL）覆盖同一个问题的两种结局。
+_ABSENT_CONCEPTS: list[tuple[tuple[str, ...], str]] = [
+    (("颜色",), "颜色"),
+    (("年龄",), "年龄"),
+    (("手机号",), "手机号"),
+    (("库存",), "库存"),
+    (("物流",), "物流单号"),
+    (("评分",), "评分"),
+    (("优惠券",), "优惠券"),
+    (("客服", "工单"), "工单"),
+    (("退货原因",), "退货原因"),
+    (("供应商",), "供应商"),
+]
 
 
 # 危险意图 -> 危险 SQL（模拟"顺从型 LLM"：用户要干啥它就写啥）

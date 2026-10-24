@@ -152,8 +152,9 @@ class TestGuardBlocksThroughStateMachine:
         assert executed_sql.strip().upper().startswith("SELECT")
 
     async def test_hallucinated_column_blocked_then_fails(self) -> None:
-        # schema 没有 color 列 -> 幻觉 SQL 被列白名单拦 -> 原样重试 -> failed
-        # （正确行为是承认没数据，而不是编一个答案）
+        # schema 没有 color 列 -> DC-2 起在生成前就被可回答性闸门拒答
+        # （status=done + 拒答话术，而不是让幻觉 SQL 撞列白名单后重试到 failed）。
+        # 闸门本身对幻觉列的白名单拦截仍有 test_sql_guard 的单元覆盖。
         graph = _graph()
         config = {"configurable": {"thread_id": "t-hallucination"}}
 
@@ -161,8 +162,43 @@ class TestGuardBlocksThroughStateMachine:
             {"question": "商品的颜色分布是怎样的", "session_id": "s7", "status": "running"},
             config,
         )
-        assert final["status"] == "failed"
-        executor_steps = [s for s in final["trace"] if s["node"] == "executor"]
-        assert len(executor_steps) >= 2
-        # 没有结果行被返回过（幻觉查询从未执行成功）
+        assert final["status"] == "done"
+        assert "无法回答" in final["insight"]["summary"]
+        assert "颜色" in final["insight"]["summary"]
+        # 闸门在生成前拦住：既没有 SQL，也没有触发过执行
+        assert final.get("sql") is None
         assert final.get("sql_result") is None
+        assert [s["node"] for s in final["trace"]] == ["schema_curator"]
+
+
+class TestAnswerabilityFlow:
+    """DC-2：数据里没有的字段，在生成之前确定性拒答。"""
+
+    async def test_unanswerable_question_refused_without_sql(self) -> None:
+        graph = _graph()
+        config = {"configurable": {"thread_id": "t-unanswerable"}}
+
+        final = await graph.ainvoke(
+            {"question": "昨天的物流单号有多少", "session_id": "s8", "status": "running"},
+            config,
+        )
+        assert final["status"] == "done"
+        assert "无法回答" in final["insight"]["summary"]
+        assert "物流单号" in final["insight"]["summary"]
+        assert final.get("sql") is None
+        assert final.get("sql_result") is None
+        assert final["trace"][-1]["node"] == "schema_curator"
+
+    async def test_answerable_question_not_refused(self) -> None:
+        # 可回答的问题必须继续走完生成/执行（防止闸门把 simple_agg 误杀）
+        graph = _graph()
+        config = {"configurable": {"thread_id": "t-answerable"}}
+
+        final = await graph.ainvoke(
+            {"question": "各渠道的订单量分别是多少", "session_id": "s9", "status": "running"},
+            config,
+        )
+        assert final["status"] == "done"
+        assert final.get("refusal") in (None, "")
+        assert final.get("sql")
+        assert final.get("sql_result") is not None

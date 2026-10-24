@@ -72,6 +72,31 @@ def test_失败记录带每次尝试的_SQL_与闸门归因():
     assert rec["error"].startswith("查询失败")
 
 
+def test_自愈后成功的闸门结论是_passed_而不是_blocked():
+    """首次执行失败、自愈后成功：闸门结论必须看最后一次执行。
+
+    DC-1 首版把"出现过任何 executor error"当作 blocked，结果自愈成功的题
+    在报告里被误标成"被闸拦截"——归因比没有归因更有害。
+    """
+    rows = [["app", 3]]
+    bad = "SELECT wrong_col FROM biz.orders"
+    good = "SELECT channel, COUNT(*) FROM biz.orders GROUP BY channel"
+    events = [
+        _sql_node(bad, retry=0),
+        _exec_node(error="db"),
+        _sql_node(good, retry=1),
+        _exec_node(row_count=1),
+        {"event": "result", "status": "done", "summary": "app 3", "sql": good,
+         "rows": rows, "retry_count": 1},
+    ]
+    rec = build_record(_q(rows=rows), 6, events, 20)
+
+    assert rec["passed"] is True
+    assert rec["gate"] == {"outcome": "passed", "rows": 1}
+    assert rec["self_heal_count"] == 1
+    assert rec["heal_error_types"] == ["db"]
+
+
 def test_成功记录包含结果哈希判定与闸门通过():
     rows = [["app", 0.62], ["web", 0.51]]
     events = [

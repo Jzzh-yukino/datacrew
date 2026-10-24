@@ -104,18 +104,15 @@ def _gate_conclusion(events: list[dict]) -> dict[str, Any]:
             "reason": _clip(approval.get("reason"), 120),
             "approval_state": "pending",
         }
-    exec_errors = [
-        (e.get("detail") or {}).get("error") for e in _node_events(events, "executor")
-        if (e.get("detail") or {}).get("error")
-    ]
-    if exec_errors:
-        return {"outcome": "blocked", "reason": str(exec_errors[-1])}
-    row_counts = [
-        (e.get("detail") or {}).get("row_count") for e in _node_events(events, "executor")
-        if (e.get("detail") or {}).get("row_count") is not None
-    ]
-    if row_counts:
-        return {"outcome": "passed", "rows": row_counts[-1]}
+    # 只看**最后一次**执行：自愈可能先失败后成功，把中间错误当成最终闸门结论
+    # 会把"自愈后跑通"的题误标成 blocked（DC-1 首次实现的实际 bug）。
+    exec_events = _node_events(events, "executor")
+    if exec_events:
+        detail = exec_events[-1].get("detail") or {}
+        if detail.get("error"):
+            return {"outcome": "blocked", "reason": str(detail["error"])}
+        if detail.get("row_count") is not None:
+            return {"outcome": "passed", "rows": detail["row_count"]}
     return {"outcome": "not_reached", "reason": "未执行 SQL"}
 
 

@@ -68,6 +68,123 @@ def is_metadata_question(question: str) -> bool:
     return any(p in q for p in _METADATA_PATTERNS)
 
 
+# ---- 可回答性闸门（DC-2）----
+# 问题：unanswerable 只有 40%——模型会为"商品的颜色/库存/供应商"编出不存在的
+# 列或表，报错重试几次后要么失败成"拒答"（碰巧算对），要么被降级成别的答案。
+# 正确做法是在**生成之前**判"数据里有没有回答这个问题所需的概念"。
+#
+# 两级判据：
+#   1. 模型判（curator 结构化输出 answerable / missing_concepts）——语义映射
+#      中英文列名，模型比规则强；
+#   2. 确定性兜底（本模块的词表 + assess_answerability 纯函数）——模型说
+#      answerable=true 却同时列出"颜色"这种 schema 里根本没有的概念时，不信自报，
+#      直接拒。反过来，模型列的缺失概念其实能映射到已有列（如"渠道"→channel）
+#      时也不拒——**两个方向都不能让模型的单方判断说了算**。
+#
+# 词表只描述"这个 schema 里某个概念可以由哪些列/口径表达"，是领域映射而不是
+# 评测集答案：新增表/列时同步补这里（漏补的后果是退回模型判断，不是误拒）。
+_SCHEMA_CONCEPT_ALIASES: dict[str, tuple[str, ...]] = {
+    "渠道": ("channel", "channel_source"),
+    "来源": ("channel", "channel_source", "event_type"),
+    "城市": ("city",),
+    "地区": ("city",),
+    "状态": ("status", "order_status"),
+    "品类": ("category",),
+    "分类": ("category",),
+    "金额": ("amount", "pay_amount", "gmv_amount", "price"),
+    "价格": ("price", "list_price"),
+    "销售额": ("pay_amount", "gmv_amount"),
+    "营收": ("pay_amount", "gmv_amount"),
+    "销量": ("quantity",),
+    "数量": ("quantity",),
+    "件数": ("quantity",),
+    "用户": ("user_id", "users"),
+    "商品": ("product_id", "products"),
+    "订单": ("order_id", "orders"),
+    "时间": ("created_at", "pay_time", "ts"),
+    "日期": ("created_at", "pay_time", "ts"),
+    "支付": ("pay_time", "order_status", "pay_amount"),
+    "转化": ("order_status", "pay_time", "event_type"),
+    "事件": ("event_type",),
+    "名称": ("name",),
+    "用户数": ("user_id",),
+    "复购": ("order_id", "user_id"),
+    "退款": ("order_status",),
+    "取消": ("order_status",),
+}
+
+
+def _schema_vocabulary(schema_context: dict[str, Any]) -> set[str]:
+    """schema 上下文的词面集合：表名、列名（含拆词）、口径名。"""
+    vocab: set[str] = set()
+    for table in schema_context.get("tables") or []:
+        name = str(table.get("name") or "").lower()
+        if name:
+            vocab.add(name)
+        for col in table.get("columns") or []:
+            col = str(col).lower()
+            vocab.add(col)
+            vocab.update(part for part in col.split("_") if part)
+    for metric in schema_context.get("metrics") or []:
+        name = str(metric.get("metric_name") or "").lower()
+        if name:
+            vocab.add(name)
+    return vocab
+
+
+def concept_covered(concept: str, schema_context: dict[str, Any]) -> bool:
+    """概念在 schema 上下文里有没有映射（纯函数，可单测）。
+
+    匹配三种情况：概念与词表项互相包含（"销量" ∈ "商品销量TopN"）、概念含
+    已知维度词且该词的列确实在上下文里（"支付成功率"含"支付"）、指标名包含概念。
+    """
+    c = (concept or "").strip().lower()
+    if not c:
+        return True
+    vocab = _schema_vocabulary(schema_context)
+    # 过短的表名/列名片段（如 id）做包含匹配噪声太大；2 字符起
+    if any(len(tok) >= 2 and (c in tok or tok in c) for tok in vocab):
+        return True
+    for key, cols in _SCHEMA_CONCEPT_ALIASES.items():
+        if key in c and any(col in vocab for col in cols):
+            return True
+    return False
+
+
+def assess_answerability(
+    analysis: dict[str, Any], schema_context: dict[str, Any]
+) -> tuple[bool, list[str], list[str]]:
+    """把 curator 输出折叠成拒答决策（纯函数，可单测）。
+
+    Returns:
+        (should_refuse, missing_concepts, unresolved_concepts)
+
+    决策表：
+        answerable=false                       -> 拒（模型判不可回答）
+        answerable=true + 缺失概念全部无映射   -> 拒（模型自相矛盾，不信自报）
+        answerable=true + 缺失概念有映射       -> 不拒（防模型误报把可答题杀掉）
+    """
+    missing: list[str] = []
+    for raw in analysis.get("missing_concepts") or []:
+        concept = str(raw).strip()
+        if concept and concept not in missing:
+            missing.append(concept)
+    unresolved = [c for c in missing if not concept_covered(c, schema_context)]
+
+    if analysis.get("answerable") is False:
+        return True, missing, unresolved
+    if missing and len(unresolved) == len(missing):
+        return True, missing, unresolved
+    return False, missing, unresolved
+
+
+def _answerability_refusal(missing: list[str]) -> str:
+    if missing:
+        return "无法回答：数据中没有 " + "、".join(missing) + "。"
+    return "无法回答：现有数据表缺少回答该问题所需的字段或口径。"
+
+
+
 def _step(node: str, started: float, **detail: Any) -> dict[str, Any]:
     latency_ms = int((time.perf_counter() - started) * 1000)
     return {"node": node, "latency_ms": latency_ms, "detail": detail}
@@ -160,7 +277,30 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
         },
     ], tier="small")  # 歧义检测是轻任务（结构化小输出），走轻量模型——分级路由的真实调用点
 
-    # 3. 歧义处理：未澄清过才追问（澄清过的直接放行，防止死循环）
+    # 3. 可回答性闸门（DC-2）：先于歧义——数据里根本没有的字段，追问口径也答不了。
+    #    走与元数据拒答相同的终态（status=done + insight.summary），条件边直达 END，
+    #    不进入 sql_generator（否则模型会为不存在的列编 SQL，重试几次后失败）。
+    should_refuse, missing, unresolved = assess_answerability(analysis, schema_context)
+    if should_refuse:
+        refusal = _answerability_refusal(missing)
+        log.info(
+            "schema.unanswerable_refused",
+            extra={"context": {
+                "question": question[:40], "missing": missing,
+                "unresolved": unresolved, "model_answerable": analysis.get("answerable"),
+            }},
+        )
+        return {
+            "refusal": refusal,
+            "schema_context": schema_context,
+            "data_as_of": as_of,
+            "status": "done",
+            "insight": {"summary": refusal, "chart_data": []},
+            "trace": [_step("schema_curator", started, refused="unanswerable",
+                            missing=missing, unresolved=unresolved)],
+        }
+
+    # 4. 歧义处理：未澄清过才追问（澄清过的直接放行，防止死循环）
     ambiguity = analysis.get("ambiguity")
     if ambiguity and not state.get("clarified_answer"):
         term = str(ambiguity.get("term") or "").strip()
