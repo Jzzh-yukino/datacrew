@@ -15,7 +15,7 @@
 | DC-7 | 自愈分布按错误类型统计 + percentile 闸修复 | `reports/self_heal_distribution.md` | `8068270` |
 | DC-8 | 50 万订单分层压测 + checkpointer 池 10→30；P50 4924→194ms、QPS 1.9→27.6 | `reports/load_test_analysis.md`；README §11 | `d9c91ff` |
 | DC-9 | 全量 120 题真实评测 81.7%（分类别见报告）+ 单题 180s 超时保护 | `reports/eval_20261025_012229.md/.jsonl`；pytest 243 | `aab9b77` |
-| L4 | 组合查询规划提示（多维/筛选+排名/占比/双条件/转化） | `tests/test_query_planner.py`（6 条）；pytest 249；multi_join 子集复测见本轮报告 | 本轮 |
+| L4 | 组合查询规划提示（多维/筛选+排名/占比/双条件/转化） | `tests/test_query_planner.py`（6 条）；pytest 249；multi_join 25 题真实子集 72%→80%→84% | 本轮 |
 
 ## 当前门禁
 
