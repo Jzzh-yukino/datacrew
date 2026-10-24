@@ -18,9 +18,13 @@ CREATE TABLE IF NOT EXISTS eval.queries (
     gold_sql    TEXT NOT NULL,            -- 人工修订过的标准 SQL
     result_hash TEXT NOT NULL,            -- 执行结果集指纹：客观判分依据
     notes       TEXT,
+    split       VARCHAR(16) NOT NULL DEFAULT 'train',  -- train / holdout（RW-2）
     created_at  TIMESTAMPTZ DEFAULT now(),
     CONSTRAINT eval_queries_question_category_key UNIQUE (question, category)
 );
+-- 老库升级：RW-2 增加 train/holdout 划分
+ALTER TABLE eval.queries
+    ADD COLUMN IF NOT EXISTS split VARCHAR(16) NOT NULL DEFAULT 'train';
 
 -- 老库升级：question-only 唯一（eval_queries_question_key）换成复合唯一。
 -- 幂等：已有复合约束则什么都不做；question_key 不存在则跳过删除。

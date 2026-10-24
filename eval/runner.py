@@ -448,22 +448,31 @@ async def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--category", default="")
+    parser.add_argument("--split", default="train",
+                        help="train（训练集，默认）/ holdout（留出集 RW-2）")
     parser.add_argument("--timeout", type=float, default=180.0,
                         help="单题超时秒数（真实模式网络挂起保护）")
     args = parser.parse_args()
 
     await init_pools()
     async with admin_pool().acquire() as conn:
-        sql = "SELECT id, question, category, result_hash FROM eval.queries"
-        params: list = []
+        await conn.execute(
+            "ALTER TABLE eval.queries ADD COLUMN IF NOT EXISTS"
+            " split VARCHAR(16) NOT NULL DEFAULT 'train'"
+        )
+        sql = (
+            "SELECT id, question, category, result_hash FROM eval.queries"
+            " WHERE split = $1"
+        )
+        params: list = [args.split]
         if args.category:
-            sql += " WHERE category = $1"
+            sql += " AND category = $2"
             params.append(args.category)
         sql += " ORDER BY id"
         queries = [dict(r) for r in await conn.fetch(sql, *params)]
     if args.limit:
         queries = queries[: args.limit]
-    print(f"共 {len(queries)} 条待评测")
+    print(f"共 {len(queries)} 条待评测（split={args.split}）")
 
     records: list[dict] = []
     for i, q in enumerate(queries, 1):
@@ -485,6 +494,7 @@ async def main() -> None:
     run_at = datetime.now().strftime("%Y-%m-%d %H:%M")
     meta = {
         "run_at": run_at,
+        "split": args.split,
         "model": settings.llm_model,
         "llm_mode": settings.llm_mode,
         "prompt_version": PROMPT_VERSION,
@@ -499,8 +509,9 @@ async def main() -> None:
     reports = Path("reports")
     reports.mkdir(exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = reports / f"eval_{stamp}.md"
-    jsonl_path = reports / f"eval_{stamp}.jsonl"
+    suffix = "" if args.split == "train" else f"_{args.split}"
+    path = reports / f"eval_{stamp}{suffix}.md"
+    jsonl_path = reports / f"eval_{stamp}{suffix}.jsonl"
 
     # 落库 eval.runs + eval.run_items（逐题明细可下钻；失败不阻塞报告落盘）
     try:
