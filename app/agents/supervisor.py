@@ -112,9 +112,9 @@ async def get_checkpointer():
     1. executemany 逐行化（FastAsyncPostgresSaver）：psycopg 异步 executemany
        走 pipeline 协议，每次同步约 22ms 固定成本，一次 invoke 11 次写入全中招
     2. supports_pipeline=False：同上，pipeline 在串行场景只有税没有收益
-    3. 池 + 全局锁替换：单连接下所有 checkpoint 操作串在一条连接上，QPS 锁死
-       3.9；池模式下 FastAsyncPostgresSaver 把父类全局锁换成空锁，QPS 随
-       并发扩展（实测并发 5/10 时 52/56，单并发 P50 55ms）
+    3. 池 + 全局锁替换：单连接下所有 checkpoint 操作串在一条连接上；池模式下
+       FastAsyncPostgresSaver 把父类全局锁换成空锁，QPS 随并发扩展
+       （分档数值见 README「压测与性能优化（D3）」，本文件不重复记录）
     - autocommit=True：setup() 的迁移 SQL 含 CREATE INDEX CONCURRENTLY，
       在事务块里会报错（经 kwargs 下传给每条连接）
     - prepare_threshold=0：关掉 prepared statement 缓存，配合 PgBouncer 也更稳

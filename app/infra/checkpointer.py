@@ -12,8 +12,11 @@
 
 修正：代理 cursor，把 executemany 换成逐行 execute。writes/blobs 表每行本是
 独立 INSERT，逐行执行语义完全一致（autocommit 下每行独立提交），只是把
-pipeline 的固定税换成 N 次廉价往返。实测端到端 472ms -> 260ms，
-QPS 1.9 -> 3.3，P95（并发 20）10.2s -> 5.6s。
+pipeline 的固定税换成 N 次廉价往返。
+
+分档数值不在此处重复记录：单一事实源是 README「压测与性能优化（D3）」。
+（本文档只解释"为什么这样改"，不记录"改完多快"——两处写同一组数字，
+迟早会有一处过期。）
 
 维护约定：只依赖父类 _cursor 的存在与 executemany 的调用形态，不复制上游
 SQL 逻辑；langgraph 升级后若 executemany 从这两处消失，本类自动退化为
@@ -68,10 +71,10 @@ class _FastCursor:
 
 
 class FastAsyncPostgresSaver(AsyncPostgresSaver):
-    """两处性能修正（均有实测数据，见模块 docstring 与 README 第 11 节）：
-    1. _cursor 产出的 cursor 包一层，executemany 逐行执行（去 pipeline 22ms 税）
+    """两处性能修正（数值以 README「压测与性能优化（D3）」为准）：
+    1. _cursor 产出的 cursor 包一层，executemany 逐行执行（去 pipeline 固定税）
     2. 池模式下把父类的全局 self.lock 换成空锁——池每次 _cursor 取独立连接，
-       全局锁是多余的串行点（实测去锁后 QPS 随并发从 4 扩展到 55）
+       全局锁是多余的串行点
     """
 
     def __init__(self, conn: Any, *args: Any, **kwargs: Any) -> None:
