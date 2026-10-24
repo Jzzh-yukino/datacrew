@@ -99,6 +99,10 @@ async def main() -> None:
     ok = [r for r in results if r["ok"]]
     transport_fail = [r for r in results if r["kind"].startswith("transport")]
     business_fail = [r for r in results if r["kind"] == "business_error"]
+    # 429（令牌桶）与 401（key 白名单）是**产品行为**，既不是传输层故障也不是
+    # 业务层错误，但必须计入错误率——早期版把它们漏在统计外，600 请求实际只有
+    # 13% 成功却打印"业务层失败 0"，压测数字会骗人（DC-8 实测抓到）。
+    http_fail = [r for r in results if r["kind"].startswith("http_")]
     qps = len(results) / wall_s if wall_s else 0.0
 
     def pct(p: float) -> float:
@@ -106,12 +110,17 @@ async def main() -> None:
 
     print(f"总请求: {len(results)}  墙钟: {wall_s:.1f}s  QPS: {qps:.1f}")
     print(f"成功: {len(ok)} ({len(ok) / len(results):.1%})  "
-          f"传输层失败: {len(transport_fail)}  业务层失败: {len(business_fail)}")
+          f"错误率: {1 - len(ok) / len(results):.1%}  "
+          f"传输层失败: {len(transport_fail)}  业务层失败: {len(business_fail)}  "
+          f"HTTP 失败: {len(http_fail)}")
     print(f"延迟 P50: {pct(0.5):.0f}ms  P95: {pct(0.95):.0f}ms  "
           f"P99: {pct(0.99):.0f}ms  max: {lat[-1]:.0f}ms")
     if transport_fail:
         kinds = {r["kind"] for r in transport_fail}
         print(f"传输层失败类型: {kinds}")
+    if http_fail:
+        kinds = {r["kind"] for r in http_fail}
+        print(f"HTTP 失败类型（限流/鉴权）: {kinds}")
     if business_fail:
         print(f"业务层失败样例: {business_fail[0]['kind']}")
 

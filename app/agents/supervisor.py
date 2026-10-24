@@ -128,7 +128,7 @@ async def get_checkpointer():
     pool = AsyncConnectionPool(
         conninfo=settings.pg_admin_dsn,
         min_size=2,
-        max_size=10,
+        max_size=settings.checkpointer_pool_max,
         open=False,
         kwargs={"autocommit": True, "prepare_threshold": 0},
     )

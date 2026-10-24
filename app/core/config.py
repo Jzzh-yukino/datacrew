@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     )
     pg_pool_min: int = 5
     pg_pool_max: int = 20
+    # checkpointer 池大小（DC-8 压测暴露的独立瓶颈：一次 invoke 约 11 次
+    # checkpoint 写入，10 条连接会把并发请求串成队列）。默认 30 的依据：
+    # PG max_connections=100，业务池 20+20 + checkpointer 30 = 70，留 30 余量；
+    # 实测并发 100/200 档 QPS 22.7→30.0、27.3→37.8（README §11）。
+    checkpointer_pool_max: int = 30
 
     # ---- Redis ----
     redis_url: str = "redis://localhost:6379/0"
