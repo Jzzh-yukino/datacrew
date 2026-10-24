@@ -1,5 +1,7 @@
 # DataCrew — 电商智能问数多智能体系统
 
+[![CI](https://github.com/ASDFGHJKL12345678SZ5/datacrew/actions/workflows/ci.yml/badge.svg)](https://github.com/ASDFGHJKL12345678SZ5/datacrew/actions/workflows/ci.yml)
+
 > LangGraph 多 Agent 编排 + MCP 工具安全层 + 评测闭环。让"自然语言问数"可澄清、可自愈、可管控、可度量。
 
 ## 1. 解决什么问题

@@ -25,6 +25,7 @@ from app.agents.prompts import (
     SQL_GENERATOR_SYSTEM,
     render,
 )
+from app.agents.query_planner import build_query_plan_hint
 from app.agents.state import AgentState
 from app.core.logging import get_logger
 from app.domain.sql_policy import INTENT_REFUSAL_TEXT, detect_forbidden_intent
@@ -473,6 +474,9 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
             "- “某天所在那一周” = 从该天起 7 天（含当天）。\n"
             "- 问题没提时间范围时，WHERE 禁止出现任何时间条件——默认全量统计。"
         )
+    plan_hint = build_query_plan_hint(state["question"])
+    if plan_hint:
+        system_prompt += f"\n【组合查询规划（L4，按需遵守）】\n{plan_hint}\n"
     if state.get("last_error"):
         # 自愈模式：把执行错误回灌，让 LLM 修正
         prompt = render(
