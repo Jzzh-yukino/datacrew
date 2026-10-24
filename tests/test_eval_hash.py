@@ -7,6 +7,7 @@
     4. 数值格式归一（1.5 与 1.50、233851 与 233851.0 同哈希）
 外加端到端防漂移：库内金标哈希 == 当前代码重算哈希。
 """
+
 from __future__ import annotations
 
 import random

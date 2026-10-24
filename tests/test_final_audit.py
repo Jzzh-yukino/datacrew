@@ -9,6 +9,7 @@
 6. 歧义检测走 tier=small（分级路由的真实调用点）
 7. execute_sql 非 PG 异常收敛成结构化错误（不炸穿节点）
 """
+
 from __future__ import annotations
 
 import pytest
@@ -59,7 +60,9 @@ class TestFreshTurnFields:
     def test_reset_values_are_fresh(self) -> None:
         assert _FRESH_TURN_FIELDS["status"] == "running"
         assert _FRESH_TURN_FIELDS["retry_count"] == 0
-        assert all(v is None for k, v in _FRESH_TURN_FIELDS.items() if k not in {"status", "retry_count"})
+        assert all(
+            v is None for k, v in _FRESH_TURN_FIELDS.items() if k not in {"status", "retry_count"}
+        )
 
 
 class TestResetTurnState:

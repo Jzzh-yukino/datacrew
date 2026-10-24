@@ -65,7 +65,7 @@ jobs:
         run: python eval/build_eval_set.py
 
       - name: ruff
-        run: ruff check app eval scripts
+        run: ruff check app eval scripts tests
 
       - name: pytest
         run: python -m pytest tests/ -q

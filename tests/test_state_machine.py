@@ -3,6 +3,7 @@
 这些测试用 Mock LLM（LLM_MODE=mock）+ 真实数据库 + 内存 checkpointer ——
 CI 不需要 API Key。每条控制流对应 README 里的一条面试叙事，测试即证据。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -156,11 +157,13 @@ class TestGuardBlocksThroughStateMachine:
         # executor；但闸本身对越权表的拦截不能因此失去端到端覆盖）。
         from app.agents.nodes import executor_node
 
-        final = await executor_node({
-            "question": "看看评测表",
-            "sql": "SELECT question FROM eval.queries",
-            "session_id": "s6b",
-        })
+        final = await executor_node(
+            {
+                "question": "看看评测表",
+                "sql": "SELECT question FROM eval.queries",
+                "session_id": "s6b",
+            }
+        )
         # 闸 4 表白名单拒绝 eval schema：错误回灌字段就位，status 仍是 running
         assert final.get("last_error")
         assert final.get("sql_result") is None

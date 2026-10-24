@@ -2,6 +2,7 @@
 
 这些测试是简历上"七道防注入闸"的直接证据 —— 每次 CI 全绿 = 每道闸都已验证。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -14,8 +15,16 @@ from app.tools.sql_guard import (
 # schema 注册表（模拟 DB 内省结果）
 ALLOWED = {
     "users": {"id", "name", "city", "channel_source", "created_at"},
-    "orders": {"id", "user_id", "channel", "gmv_amount", "pay_amount",
-               "order_status", "created_at", "pay_time"},
+    "orders": {
+        "id",
+        "user_id",
+        "channel",
+        "gmv_amount",
+        "pay_amount",
+        "order_status",
+        "created_at",
+        "pay_time",
+    },
     "products": {"id", "name", "category", "status", "list_price"},
     "order_items": {"id", "order_id", "product_id", "quantity", "price"},
     "traffic_logs": {"id", "user_id", "event_type", "ts"},
@@ -47,15 +56,18 @@ class TestGate2SingleStatement:
 
 
 class TestGate3ReadOnly:
-    @pytest.mark.parametrize("sql", [
-        "DELETE FROM users WHERE id = 1",
-        "UPDATE orders SET pay_amount = 0",
-        "INSERT INTO users (name, channel_source) VALUES ('x', 'app')",
-        "DROP TABLE users",
-        "TRUNCATE users",
-        "ALTER TABLE users ADD COLUMN x int",
-        "COPY users TO '/tmp/x.csv'",
-    ])
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "DELETE FROM users WHERE id = 1",
+            "UPDATE orders SET pay_amount = 0",
+            "INSERT INTO users (name, channel_source) VALUES ('x', 'app')",
+            "DROP TABLE users",
+            "TRUNCATE users",
+            "ALTER TABLE users ADD COLUMN x int",
+            "COPY users TO '/tmp/x.csv'",
+        ],
+    )
     def test_write_statements_rejected(self, sql: str) -> None:
         with pytest.raises(UnsafeSQLError, match="仅允许 SELECT"):
             validate_sql(sql, ALLOWED)
@@ -170,9 +182,7 @@ class TestGate5SubqueryAndCase:
 
     def test_star_in_cte_rejected(self) -> None:
         with pytest.raises(UnsafeSQLError, match="禁止 SELECT"):
-            validate_sql(
-                "WITH t AS (SELECT * FROM users) SELECT id FROM t", ALLOWED
-            )
+            validate_sql("WITH t AS (SELECT * FROM users) SELECT id FROM t", ALLOWED)
 
     def test_uppercase_unquoted_table_ok(self) -> None:
         """PG 折叠未加引号标识符：FROM USERS ≡ FROM users，必须放行。"""
@@ -192,6 +202,7 @@ class TestGate5SubqueryAndCase:
         """COUNT(*) 在聚合内部不是投影，全层检查也不能误杀。"""
         r = validate_sql("SELECT COUNT(*) FROM users", ALLOWED)
         assert not r.needs_approval
+
 
 class TestGate6FunctionWhitelist:
     """最终审查新增：函数接入从黑名单改为白名单（2026-10-01）。
@@ -293,8 +304,7 @@ class TestGate4CteShadowing:
         CTE 别名 queries 曾把真实表 eval.queries 一起减掉，白名单失效。"""
         with pytest.raises(UnsafeSQLError, match="未授权的表"):
             validate_sql(
-                "WITH queries AS (SELECT count(*) FROM eval.queries) "
-                "SELECT count(*) FROM queries",
+                "WITH queries AS (SELECT count(*) FROM eval.queries) SELECT count(*) FROM queries",
                 ALLOWED,
             )
 
@@ -325,9 +335,7 @@ class TestGate4CteShadowing:
         assert r.tables == []
 
     def test_lateral_alias_column_ok(self) -> None:
-        r = validate_sql(
-            "SELECT g FROM users, LATERAL (SELECT 1 AS g) x", ALLOWED
-        )
+        r = validate_sql("SELECT g FROM users, LATERAL (SELECT 1 AS g) x", ALLOWED)
         assert r.tables == ["users"]
 
 
@@ -335,15 +343,11 @@ class TestGate3SetOperations:
     """最终审查新增：纯 SELECT 的集合运算应放行（曾一律误杀且话术误导）。"""
 
     def test_union_all_allowed(self) -> None:
-        r = validate_sql(
-            "SELECT id FROM users UNION ALL SELECT user_id FROM orders", ALLOWED
-        )
+        r = validate_sql("SELECT id FROM users UNION ALL SELECT user_id FROM orders", ALLOWED)
         assert set(r.tables) == {"users", "orders"}
 
     def test_except_allowed(self) -> None:
-        r = validate_sql(
-            "SELECT id FROM users EXCEPT SELECT user_id FROM orders", ALLOWED
-        )
+        r = validate_sql("SELECT id FROM users EXCEPT SELECT user_id FROM orders", ALLOWED)
         assert set(r.tables) == {"users", "orders"}
 
     def test_union_with_write_branch_rejected(self) -> None:
@@ -353,9 +357,7 @@ class TestGate3SetOperations:
         同样是拒，且话术对自养同样有效。
         """
         with pytest.raises(UnsafeSQLError):
-            validate_sql(
-                "SELECT id FROM users UNION ALL DELETE FROM users", ALLOWED
-            )
+            validate_sql("SELECT id FROM users UNION ALL DELETE FROM users", ALLOWED)
 
 
 class TestGate7TrivialWhere:
@@ -370,10 +372,9 @@ class TestGate7TrivialWhere:
         assert r.needs_approval
 
     def test_real_where_skips_approval(self) -> None:
-        r = validate_sql(
-            "SELECT id FROM orders WHERE created_at >= '2026-01-01'", ALLOWED
-        )
+        r = validate_sql("SELECT id FROM orders WHERE created_at >= '2026-01-01'", ALLOWED)
         assert not r.needs_approval
+
 
 class TestEndToEnd:
     def test_typical_business_query(self) -> None:

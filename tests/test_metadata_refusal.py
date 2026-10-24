@@ -5,6 +5,7 @@
 "共 20000 条记录"——**把"列"当"行"**，比拒答更糟（用户会当真）。
 而正确答案要查 information_schema，被闸 4 表白名单禁止——所以正确结局是拒答。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -24,27 +25,33 @@ def _graph():
 class TestMetadataDetection:
     """规则判定（纯函数）：命中的要拒答，业务问题一律不能误伤。"""
 
-    @pytest.mark.parametrize("q", [
-        "流量日志表一共有多少列记录",
-        "orders 表有几列",
-        "这个表有哪些列",
-        "商品表的字段名是什么",
-        "orders 的表结构是什么",
-        "给我建表语句",
-        "这张表有哪些索引",
-        "主键是什么",
-    ])
+    @pytest.mark.parametrize(
+        "q",
+        [
+            "流量日志表一共有多少列记录",
+            "orders 表有几列",
+            "这个表有哪些列",
+            "商品表的字段名是什么",
+            "orders 的表结构是什么",
+            "给我建表语句",
+            "这张表有哪些索引",
+            "主键是什么",
+        ],
+    )
     def test_metadata_questions_detected(self, q: str) -> None:
         assert is_metadata_question(q) is True, q
 
-    @pytest.mark.parametrize("q", [
-        "上个月各渠道的实付销售额是多少",
-        "流量日志表一共有多少行记录",
-        "各城市的订单量排名",
-        "昨天有多少订单",
-        "最近哪个商品卖得最好",
-        "哪个渠道的客单价最高",
-    ])
+    @pytest.mark.parametrize(
+        "q",
+        [
+            "上个月各渠道的实付销售额是多少",
+            "流量日志表一共有多少行记录",
+            "各城市的订单量排名",
+            "昨天有多少订单",
+            "最近哪个商品卖得最好",
+            "哪个渠道的客单价最高",
+        ],
+    )
     def test_business_questions_not_detected(self, q: str) -> None:
         assert is_metadata_question(q) is False, q
 

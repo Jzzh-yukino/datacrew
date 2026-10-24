@@ -68,7 +68,7 @@ TRAFFIC_W = [0.60, 0.25, 0.10, 0.05]
 # ============================================================================
 METRIC_DEFINITIONS: list[tuple[str, str, str, str]] = [
     # ---- 整体类（单一标量）----
-    ("GMV", "所有下单订单的成交总额（含取消/退款单），取 orders.gmv_amount 求和，不过滤 order_status",
+    ("GMV", "所有下单订单的成交总额（含取消/退款单，即 GMV 口径的销售额），取 orders.gmv_amount 求和，不过滤 order_status",
      "SELECT SUM(gmv_amount) FROM biz.orders WHERE created_at >= $1 AND created_at < $2",
      "整体类：返回单一标量"),
     ("实付销售额", "支付成功的订单实付金额总和，取 orders.pay_amount 求和，order_status IN ('paid','refunded')；统计周期一律按下单时间 created_at（与金标一致，pay_time 会漏跨月支付）",
@@ -153,6 +153,9 @@ METRIC_DEFINITIONS: list[tuple[str, str, str, str]] = [
     ("加购到购买转化用户数", "既是加购用户（traffic_logs.event_type='cart'）又有下单记录的去重用户数（**是人数，不是比率**）",
      "SELECT COUNT(DISTINCT t.user_id) FROM biz.traffic_logs t WHERE t.event_type='cart' AND EXISTS (SELECT 1 FROM biz.orders o WHERE o.user_id=t.user_id)",
      "转化类：输出**人数**（不是百分比）；交集语义用 EXISTS"),
+    # 活动窗口是组织约定，不是从数据里推出来的；放在注册表里，提示词只引用它
+    ("活动窗口", "组织约定：双11 大促 = 11-10 至 11-12；618 大促 = 06-18 当天；国庆黄金周 = 10-01 至 10-07；元旦 = 01-01 当天；春节 = 农历除夕至初六（取数据范围内最近一次）。示例：双11 期间 = created_at >= '11-10' AND < '11-13'。",
+     "", "时间窗口类：按这些窗口换算 created_at 范围，不要自行发明大促区间"),
 ]
 
 

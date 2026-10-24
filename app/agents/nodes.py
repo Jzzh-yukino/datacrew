@@ -304,6 +304,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     #     -> 确定性 interrupt，不调用 LLM（省钱且行为稳定）。LLM 歧义判定
     #     保留为补充：规则没命中时才看模型输出（见下方第 4 步）。
     clarified = state.get("clarified_answer")
+    rule_preference: str | None = None
     if not clarified:
         rule = match_clarification_rule(question, schema_context)
         if rule:
@@ -315,6 +316,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
             if remembered and not stated:
                 # ---- 记忆命中：不打断用户，把偏好当作本轮澄清结果继续 ----
                 clarified = remembered
+                rule_preference = remembered
                 await mark_preference_used(session_id, term)
                 log.info(
                     "clarification.rule_preference_applied",
@@ -443,7 +445,11 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
         "clarified_answer": clarified,
         "data_as_of": as_of,
         "status": "running",
-        "trace": [_step("schema_curator", started, tables=len(schema_context.get("tables", [])))],
+        "trace": [_step(
+            "schema_curator", started,
+            tables=len(schema_context.get("tables", [])),
+            preference_applied=rule_preference,
+        )],
     }
 
 
@@ -469,8 +475,8 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
             f"上个月 = {as_of} 所在月的上一个整月；本月至今 = {as_of} 所在月 1 日到截止日。\n"
             "- 未写年份的日历事件（双11/双12/618/元旦/春节）取**数据范围内最近一次**"
             "（数据截止日之前），不要用系统当前年份。\n"
-            "- “大促期间” = 双11 大促窗口：11-10 至 11-12"
-            "（created_at >= '11-10' AND < '11-13'）。\n"
+            "- “大促期间”等活动窗口（双11、618、国庆等）一律按指标注册表里的"
+            "“活动窗口”口径行给出的日期区间换算，不要自行发明区间。\n"
             "- “某天所在那一周” = 从该天起 7 天（含当天）。\n"
             "- 问题没提时间范围时，WHERE 禁止出现任何时间条件——默认全量统计。"
         )

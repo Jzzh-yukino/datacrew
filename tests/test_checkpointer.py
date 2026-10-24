@@ -4,6 +4,7 @@
 成本），checkpoint 写入被它拖慢 4 倍以上；单连接 + 全局锁让 QPS 锁死。
 这两个测试守住修正不被回归——改了这里，压测数字会悄悄退化。
 """
+
 import asyncio
 
 from app.infra.checkpointer import FastAsyncPostgresSaver, _FastCursor

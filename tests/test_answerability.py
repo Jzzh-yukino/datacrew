@@ -5,6 +5,7 @@
   answerable=true 但缺失概念在 schema 里全无映射 -> 仍拒；
   模型报缺失但概念其实能映射到已有列/口径 -> 不拒（防误杀可答题）。
 """
+
 from __future__ import annotations
 
 import json
@@ -18,10 +19,19 @@ from app.agents.nodes import (
 
 SCHEMA = {
     "tables": [
-        {"name": "orders", "columns": [
-            "id", "user_id", "channel", "gmv_amount", "pay_amount",
-            "order_status", "created_at", "pay_time",
-        ]},
+        {
+            "name": "orders",
+            "columns": [
+                "id",
+                "user_id",
+                "channel",
+                "gmv_amount",
+                "pay_amount",
+                "order_status",
+                "created_at",
+                "pay_time",
+            ],
+        },
         {"name": "users", "columns": ["id", "name", "city", "channel_source", "created_at"]},
         {"name": "products", "columns": ["id", "name", "category", "status", "list_price"]},
         {"name": "order_items", "columns": ["id", "order_id", "product_id", "quantity", "price"]},
@@ -30,8 +40,16 @@ SCHEMA = {
     "metrics": [
         {"metric_name": n}
         for n in (
-            "订单量", "实付销售额", "客单价", "退款率", "复购率", "销量",
-            "件单价", "加购到购买转化用户数", "下单到支付转化率", "购买用户数",
+            "订单量",
+            "实付销售额",
+            "客单价",
+            "退款率",
+            "复购率",
+            "销量",
+            "件单价",
+            "加购到购买转化用户数",
+            "下单到支付转化率",
+            "购买用户数",
         )
     ],
 }
@@ -63,10 +81,12 @@ ANSWERABLE = [
 
 def _curator(question: str) -> dict:
     """用 mock 的 curator 输出当"模型返回"，避免测试里手写理想化的假输出。"""
-    raw = mock_chat([
-        {"role": "system", "content": "你是电商数据分析助手的数据规划专家。"},
-        {"role": "user", "content": f"问题：{question}\n可用表：biz.orders(...)"},
-    ])
+    raw = mock_chat(
+        [
+            {"role": "system", "content": "你是电商数据分析助手的数据规划专家。"},
+            {"role": "user", "content": f"问题：{question}\n可用表：biz.orders(...)"},
+        ]
+    )
     return json.loads(raw)
 
 
@@ -105,9 +125,9 @@ def test_模型报缺失但概念能映射到已有列_不误拒():
 
 
 def test_概念覆盖判定的边界():
-    assert concept_covered("渠道", SCHEMA)      # 别名 -> channel
-    assert concept_covered("订单量", SCHEMA)    # 口径名精确命中
-    assert concept_covered("商品", SCHEMA)      # 别名 -> products/product_id
+    assert concept_covered("渠道", SCHEMA)  # 别名 -> channel
+    assert concept_covered("订单量", SCHEMA)  # 口径名精确命中
+    assert concept_covered("商品", SCHEMA)  # 别名 -> products/product_id
     assert not concept_covered("颜色", SCHEMA)
     assert not concept_covered("物流单号", SCHEMA)
     assert not concept_covered("供应商", SCHEMA)

@@ -125,78 +125,61 @@ async def load_metric_definitions(use_cache: bool = True) -> list[dict]:
 # 的术语（客单价/取消率）在选项里显式标注"注册口径"与另一种常见算法，让用户
 # 做选择而不是由模型猜。新增术语/口径时同步补这张表——
 # tests/test_clarification_rules.py 用评测集锁住"该问的 8 问、不该问的不问"。
-CLARIFICATION_RULES: tuple[dict, ...] = (
-    {
-        "term": "用户数",
-        "options": ("下单用户数", "购买用户数", "日活用户"),
-        "question": "您说的“用户数”是指下单用户、购买用户，还是日活用户？",
-        "qualifier_keywords": (
-            "下单", "购买", "日活", "活跃", "登录", "浏览", "加购", "新增",
-            "老", "复购", "首单", "去重", "只", "仅", "单",
-        ),
-        "require_scalar": True,
-        "grouped_is_qualified": True,
-        "dimension_is_qualified": True,
-    },
-    {
-        "term": "转化率",
-        "options": ("下单转化率", "下单到支付转化率", "加购到购买转化用户数"),
-        "question": "您说的“转化率”是下单转化、下单到支付转化，还是加购到购买转化？",
-        "qualifier_keywords": ("下单", "支付", "加购", "购买", "浏览", "到", "→"),
-        "require_scalar": False,
-    },
-    {
-        "term": "客单价",
-        "options": (
-            "客单价（注册口径：实付销售额 / 支付成功订单数）",
-            "客单价（不含退款单）",
-        ),
-        "question": "客单价按注册口径（实付销售额 ÷ 支付成功订单数）还是不含退款单统计？",
-        "qualifier_keywords": (
-            "整体", "各", "平均", "每", "当天", "双11", "双 11", "月", "年", "近",
-        ),
-        "require_scalar": True,
-        "grouped_is_qualified": True,
-        "dimension_is_qualified": True,
-    },
-    {
-        "term": "取消率",
-        "options": ("取消率（按订单数：取消订单 / 全部订单）", "取消率（按取消金额占比）"),
-        "question": "取消率按订单数还是按金额口径统计？",
-        "qualifier_keywords": ("整体", "各", "按", "每", "金额", "订单数"),
-        "require_scalar": True,
-    },
-    {
-        "term": "活跃用户",
-        "options": ("日活用户（当日有行为）", "月活用户（近 30 天有行为）"),
-        "question": "您说的“活跃用户”是日活（当日有行为）还是月活（近 30 天有行为）？",
-        "qualifier_keywords": ("日活", "月活", "30 天", "近 30 天"),
-        "require_scalar": True,
-    },
-    {
-        "term": "消费金额",
-        "options": ("GMV（含取消/退款）", "实付销售额（支付成功）"),
-        "question": "“消费金额”按 GMV（含取消/退款）还是实付销售额统计？",
-        "qualifier_keywords": ("GMV", "实付"),
-        "require_scalar": False,
-        "grouped_is_qualified": True,
-        "dimension_is_qualified": True,
-    },
-    {
-        "term": "销售情况",
-        "options": ("销量（件数）", "GMV（下单金额）", "实付销售额（实付金额）"),
-        "question": "“销售情况”看销量（件数）、GMV 还是实付销售额？",
-        "qualifier_keywords": ("销量", "GMV", "实付", "销售额"),
-        "require_scalar": False,
-    },
-    {
-        "term": "新用户",
-        "options": ("新注册用户数（按注册时间）", "首次下单用户数（按首单时间）"),
-        "question": "“新用户”指新注册用户，还是首次下单用户？",
-        "qualifier_keywords": ("新增", "注册", "首次", "下单用户"),
-        "require_scalar": False,
-    },
+# 通用业务名词后缀（形态词，不是题目术语）：规则由注册表数据推导——
+# 同一术语在注册表里对应 >=2 个不同 SQL 口径，就判为歧义。
+# 不再手写"用户数/客单价/..."八条规则；新增口径只需进注册表。
+_AMBIGUITY_TERMS: tuple[str, ...] = (
+    "销售额", "订单金额", "用户数", "转化率", "客单价", "取消率", "退款率",
+    "复购率", "订单量", "销量", "件单价", "占比", "频次", "人数", "金额",
 )
+
+
+def derive_clarification_rules(metrics: list[dict]) -> list[dict]:
+    """从 metric_definitions 推导歧义规则（纯函数，可单测）。"""
+    rules: list[dict] = []
+    for term in _AMBIGUITY_TERMS:
+        matched = [
+            m for m in metrics
+            if (term in m.get("metric_name", "")
+                # 英文缩写指标（GMV）允许用定义命中：GMV 的中文说法就是销售额
+                or (m.get("metric_name", "").isascii()
+                    and term in m.get("definition", "")))
+            # 占比/排名类是派生指标，不是同一业务词的另一口径
+            and not str(m.get("usage_hint", "")).startswith(("占比类", "排名类"))
+        ]
+        # 同一术语至少两种不同 SQL 口径才算歧义；如果注册表里就有
+        # 与术语同名的规范口径（如“订单量”），说明它是单一语义，不问
+        if any(m.get("metric_name") == term for m in matched):
+            continue
+        hints = {m.get("sql_hint") or m.get("definition") for m in matched}
+        if len(hints) < 2:
+            continue
+        qualifiers: set[str] = {"整体"}
+        for m in matched:
+            name = m.get("metric_name", "")
+            if term in name:
+                qualifier = name.replace(term, "").strip()
+                if qualifier:
+                    qualifiers.add(qualifier)
+            elif name:
+                qualifiers.add(name)
+        options = tuple(m["metric_name"] for m in matched)
+        rules.append({
+            "term": term,
+            "options": options,
+            "question": (
+                f"您说的“{term}”按哪个已注册口径统计？可选："
+                + " / ".join(options)
+            ),
+            "qualifier_keywords": tuple(sorted(qualifiers)),
+        })
+    # 长词优先：避免“金额”截胡“销售额/订单金额”
+    rules.sort(key=lambda r: -len(r["term"]))
+    return rules
+
+
+# 兼容旧导入：不再有手写规则，规则从 schema_context.metrics 实时推导
+CLARIFICATION_RULES: tuple[dict, ...] = ()
 
 _SCALAR_MARKERS = ("是多少", "有多少", "怎么样", "多少", "如何", "多大")
 _GROUPING_RE = re.compile(r"(?:各|按|每|分\s*组|分渠道|分城市|分品类|分组)")
@@ -207,26 +190,24 @@ def match_clarification_rule(
 ) -> dict | None:
     """规则优先澄清：命中返回口径规则，否则 None（纯函数，可单测）。
 
-    四条保护（防"过度追问"事故复发）：
-    1. 问题已含候选口径的限定词（实付/GMV/日活…）-> 已限定，不问
-    2. 标量型术语要求问题确实在问一个数（是多少/有多少/怎么样）-> 不问列表型
-    3. 分组问题（各/按/每）对"用户数/客单价"来说已限定维度 -> 不问
-    4. 问题里出现已知维度取值（北京/app…）-> 是带过滤的查询，不问
+    规则不再手写：`derive_clarification_rules` 从 schema_context.metrics
+    （metric_definitions）实时推导——同一术语有 >=2 个不同 SQL 口径即歧义。
+    问题已含候选口径限定词（实付/GMV/日活…）时不问，避免过度追问。
     """
     q = (question or "").strip()
     if not q:
         return None
-    matched_values = set((schema_context.get("matched_values") or {}).keys())
-    for rule in CLARIFICATION_RULES:
+    metrics = schema_context.get("metrics") or []
+    # 分组/排名/占比类问法已给出维度或派生口径，规则不追问（旧版
+    # grouped_is_qualified 的通用化）；歧义交给 LLM 补充判定。
+    if _GROUPING_RE.search(q) or re.search(
+        r"(?:占比|比例|排名|最大|最小|前\s*\d+|Top|分布|趋势|贡献)", q, re.I
+    ):
+        return None
+    for rule in derive_clarification_rules(metrics):
         if rule["term"] not in q:
             continue
         if any(k in q for k in rule.get("qualifier_keywords", ())):
-            continue
-        if rule.get("require_scalar") and not any(m in q for m in _SCALAR_MARKERS):
-            continue
-        if rule.get("grouped_is_qualified") and _GROUPING_RE.search(q):
-            continue
-        if rule.get("dimension_is_qualified") and any(v and v in q for v in matched_values):
             continue
         return rule
     return None

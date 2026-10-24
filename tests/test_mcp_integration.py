@@ -9,6 +9,7 @@
 
 依赖：schema_search/sql_execute 需要 PG（CI 有 service 容器；本地没有则跳过）。
 """
+
 from __future__ import annotations
 
 import json
@@ -39,11 +40,18 @@ class McpStdio:
             env=env,
         )
         self._next_id = 0
-        self._send({
-            "jsonrpc": "2.0", "id": 0, "method": "initialize",
-            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
-                       "clientInfo": {"name": "pytest", "version": "1"}},
-        })
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": 0,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "1"},
+                },
+            }
+        )
         assert "result" in self._recv()
         self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
 
@@ -61,8 +69,14 @@ class McpStdio:
 
     def call(self, name: str, arguments: dict) -> dict:
         self._next_id += 1
-        self._send({"jsonrpc": "2.0", "id": self._next_id, "method": "tools/call",
-                    "params": {"name": name, "arguments": arguments}})
+        self._send(
+            {
+                "jsonrpc": "2.0",
+                "id": self._next_id,
+                "method": "tools/call",
+                "params": {"name": name, "arguments": arguments},
+            }
+        )
         resp = self._recv()
         assert "result" in resp, resp
         return json.loads(resp["result"]["content"][0]["text"])
@@ -117,10 +131,13 @@ def test_sandbox_compute_inside_mcp(mcp: McpStdio) -> None:
 
 
 def test_sandbox_network_blocked_inside_mcp(mcp: McpStdio) -> None:
-    r = mcp.call("python_sandbox", {
-        "code": "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)",
-        "timeout_s": 5,
-    })
+    r = mcp.call(
+        "python_sandbox",
+        {
+            "code": "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)",
+            "timeout_s": 5,
+        },
+    )
     assert r["ok"] is False
     assert r["error_type"] == "blocked"
 
@@ -132,11 +149,14 @@ def test_sandbox_timeout_inside_mcp(mcp: McpStdio) -> None:
 
 
 def test_chart_gen_inside_mcp(mcp: McpStdio) -> None:
-    r = mcp.call("chart_gen", {
-        "chart_type": "bar",
-        "data": [["app", 100], ["h5", 20]],
-        "title": "回归",
-    })
+    r = mcp.call(
+        "chart_gen",
+        {
+            "chart_type": "bar",
+            "data": [["app", 100], ["h5", 20]],
+            "title": "回归",
+        },
+    )
     assert r["ok"] is True
     assert r["url"].startswith("/files/")
 

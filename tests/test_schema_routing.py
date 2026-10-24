@@ -4,6 +4,7 @@
 order_items——**users 表没进上下文**，模型看不到 city 列，于是"北京"和"上海"生成
 逐字节相同的 SQL（都是全国汇总）。根因不是模型能力，是**上下文缺失**。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -36,7 +37,9 @@ class TestDimensionIndex:
         index = await load_dimension_index()
         assert index, "值索引为空——检查 PG 是否可连、biz 表是否有 text 列"
         # 城市是低基数维度：北京必须能映射到 users.city
-        assert ["users", "city"] in index.get("北京", []), f"北京 未映射到 users.city：{index.get('北京')}"
+        assert ["users", "city"] in index.get("北京", []), (
+            f"北京 未映射到 users.city：{index.get('北京')}"
+        )
         # 高基数（用户姓名 5000 个）不该进索引，否则噪声淹没信号
         assert "users" not in [t for pairs in index.values() for t, c in pairs if c == "name"]
         # 渠道值也在

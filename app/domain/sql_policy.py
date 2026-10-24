@@ -78,23 +78,32 @@ DEFAULT_ROW_LIMIT = 1000
 # 形态"而不是关键词命中——「删除率」「修改次数」「更新频率」是正常统计问题，
 # 不能被误伤（验收要求）。所以每条写意图正则后面都跟统计后缀的否定前瞻。
 _WRITE_VERBS = (
-    r"(?:删除|删掉|删了|清空|截断|清除|修改|更新|改成|改掉|插入|写入|"
+    r"(?:删除|删掉|删了|清空|截断|清除|腾空|导出|修改|更新|改成|改掉|插入|写入|"
     r"建表|授权|drop|delete|update|insert|truncate|alter|grant|create\s+table)"
 )
 # 动作后面接这些字，说明是统计名词而不是祈使动作（删除率 / 修改次数 / 更新频率）
 _STAT_SUFFIX = r"(?!率|次|量|占|统|分|情|趋|明|频|周|间隔|数量)"
+# 写意图的对象：表/库/数据/记录/敏感列。只问“更新过地址的用户数”没有这些对象，
+# 不能仅凭“请/帮我 + 更新”就拒（RW-4 误拒）。
+_WRITE_OBJECT = r"(?:库|数据|schema|手机号|密码|账号|凭据|(?:所有|全部)订单|(?<!列)表)"
 WRITE_INTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    # "把/将/帮我/请/麻烦/给我 … 改成"（含"查订单数然后把用户表删了"这类多语句注入）
-    re.compile(r"(?:把|将|帮我|请|麻烦|给我).{0,20}" + _WRITE_VERBS + _STAT_SUFFIX),
-    # 祈使句以写动作开头："删除用户表"；"删除率是多少" 不命中
-    re.compile(r"^[　\s]*" + _WRITE_VERBS + _STAT_SUFFIX),
-    # 写动作 + 表/库对象："删除用户表""清空订单表"（"订单表的修改次数"不命中）
-    re.compile(_WRITE_VERBS + r".{0,6}(?:表|库)"),
+    # "把/将/帮我/请/麻烦/给我 … 动作 + 对象"（含"查订单数然后把用户表删了"）
+    re.compile(
+        r"(?:把|将|帮我|请|麻烦|给我).{0,20}(?:"
+        + _WRITE_VERBS + r".{0,10}" + _WRITE_OBJECT
+        + "|" + _WRITE_OBJECT + r".{0,10}" + _WRITE_VERBS + ")"
+    ),
+    # 祈使句以写动作开头 + 对象："删除用户表""更新订单数据"
+    re.compile(r"^[　\s]*" + _WRITE_VERBS + _STAT_SUFFIX + r".{0,10}" + _WRITE_OBJECT),
+    # 写动作 + 表/库对象："删除用户表""清空订单表"（排除“列表”）
+    re.compile(_WRITE_VERBS + r".{0,6}(?<!列)(?:表|库)"),
+    # 改订单状态是写操作（"把未支付订单的状态改成已支付"）
+    re.compile(r"订单.{0,8}状态.{0,6}(?:改成|更新为|修改为)"),
 )
 
 # 资源滥用：睡眠拖库 / 全部字段无过滤 / 超深嵌套——请求本身就在攻击数据库
 RESOURCE_ABUSE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?:睡眠|睡一会|睡一下|拖慢|拖一下|卡死|压测|压力测试|pg_sleep|死循环)"),
+    re.compile(r"(?:睡眠|睡一会|睡一下|让数据库忙|忙一会|忙一下|占用|拖慢|拖一下|卡死|压测|压力测试|pg_sleep|死循环)"),
     re.compile(r"(?:全部字段|所有字段|select\s*\*|SELECT\s*\*)"),
     re.compile(r"嵌套.{0,10}(?:十几|十多|[4-9]|\d{2,})"),
 )
@@ -104,11 +113,14 @@ RESOURCE_ABUSE_PATTERNS: tuple[re.Pattern[str], ...] = (
 # ——闸根本没机会响。既然正确结局是拒答，就在生成前确定性拒掉；七道闸的拦截
 # 能力仍由 55 条 test_sql_guard 单测与 sale_amount 自愈链路覆盖。
 PROBE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"评测表"),
-    re.compile(r"(?:系统表|information_schema|pg_catalog|pg_tables|pg_class)"),
+    # 判据是 schema，不是某个出题词：非 biz schema 的对象（eval / 系统表）
+    re.compile(r"\b(?:eval|information_schema|pg_catalog|pg_tables|pg_class)\b", re.I),
+    re.compile(r"(?:系统表|元数据表)"),
+    re.compile(r"(?:列出|查看|显示|所有|全部).{0,8}schema", re.I),
     re.compile(r"(?:数据库|库里).{0,8}(?:哪些|什么|所有).{0,4}表"),
     re.compile(r"(?:有哪些|有什么|都有哪些|都有什么).{0,4}表"),
     re.compile(r"表名"),
+    re.compile(r"(?:密码|凭据|连接串|connection\s*string)", re.I),
 )
 
 INTENT_KIND_WRITE = "write"

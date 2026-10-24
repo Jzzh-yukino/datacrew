@@ -4,6 +4,7 @@
 边界、上个月按谁算」这些组织约定写进提示词。提示词一旦被回退/精简，本测试
 必须立刻红——否则 93% 的通过率会在下一次改动里静默退化。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -29,14 +30,16 @@ async def test_sql_prompt_contains_time_rules(monkeypatch) -> None:
 
     monkeypatch.setattr(nodes, "chat_json", fake_chat_json)
     lo, _hi = await _data_bounds()
-    out = await sql_generator_node({
-        "question": "上个月的订单量",
-        "schema_context": {
-            "tables": [{"name": "orders", "columns": ["id", "created_at"]}],
-            "metrics": [],
-        },
-        "data_as_of": "2026-09-30",
-    })
+    out = await sql_generator_node(
+        {
+            "question": "上个月的订单量",
+            "schema_context": {
+                "tables": [{"name": "orders", "columns": ["id", "created_at"]}],
+                "metrics": [],
+            },
+            "data_as_of": "2026-09-30",
+        }
+    )
     prompt = captured["system"]
 
     # 数据范围必须注入（模型要知道"数据里有哪些年份"才可能取对日历事件年份）

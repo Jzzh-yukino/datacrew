@@ -6,6 +6,7 @@
   2. 记忆不污染新会话（评测集每题独立 session，行为与改动前完全一致）；
   3. 用户当场说出的口径优先于历史偏好（记忆不能覆盖人的显式表述）。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -94,9 +95,7 @@ class TestPreferenceLoop:
         cfg = {"configurable": {"thread_id": "t-mem-hit"}}
 
         # 第 1 轮：没有任何记忆 → 必须澄清
-        await graph.ainvoke(
-            {"question": QUESTION, "session_id": sid, "status": "running"}, cfg
-        )
+        await graph.ainvoke({"question": QUESTION, "session_id": sid, "status": "running"}, cfg)
         payload = await _pending_interrupt(graph, cfg)
         assert payload is not None and payload["type"] == "clarification"
 
@@ -107,15 +106,14 @@ class TestPreferenceLoop:
 
         # 第 2 轮：新 thread、同一 session → 命中记忆，不再打断用户
         cfg2 = {"configurable": {"thread_id": "t-mem-hit-2"}}
-        await graph.ainvoke(
-            {"question": QUESTION, "session_id": sid, "status": "running"}, cfg2
-        )
+        await graph.ainvoke({"question": QUESTION, "session_id": sid, "status": "running"}, cfg2)
         assert await _pending_interrupt(graph, cfg2) is None, "命中记忆后不应再追问"
 
         state = await graph.aget_state(cfg2)
         assert state.values["clarified_answer"] == "实付销售额", "口径应沿用记忆"
         applied = [
-            step for step in state.values["trace"]
+            step
+            for step in state.values["trace"]
             if (step.get("detail") or {}).get("preference_applied")
         ]
         assert applied, "trace 应带 preference_applied 标记（前端时间线据此展示）"

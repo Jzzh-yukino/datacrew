@@ -8,6 +8,7 @@
 这个测试把"漂移"从**静默错误**变成**红灯**：以后改了注册表却没同步金标（或反之），
 这里立刻失败——与 `test_eval_hash`（金标哈希不变量）同一个思路，是评测体系的信任根。
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -23,9 +24,9 @@ pytestmark = pytest.mark.usefixtures("db_pools")
 class Alignment:
     """一个"注册表口径 ↔ 金标问题"的对齐用例。"""
 
-    metric: str          # biz.metric_definitions.metric_name
-    question: str        # eval.queries.question
-    scale: float = 1.0   # 注册表算比率(0.055)，金标算百分比(5.55) 时填 100
+    metric: str  # biz.metric_definitions.metric_name
+    question: str  # eval.queries.question
+    scale: float = 1.0  # 注册表算比率(0.055)，金标算百分比(5.55) 时填 100
     dimensioned: bool = False  # 金标是按维度分组的多行结果（如各品类、各渠道）
 
 
@@ -60,7 +61,7 @@ async def test_paramless_hints_are_executable() -> None:
         )
         checked_metrics: set[str] = set()
         for r in rows:
-            if "$1" in r["sql_hint"] or "$2" in r["sql_hint"]:
+            if not r["sql_hint"] or "$1" in r["sql_hint"] or "$2" in r["sql_hint"]:
                 continue  # 带时间参数的模板不在本测试范围（无法独立执行）
             try:
                 await conn.execute(r["sql_hint"])
@@ -106,7 +107,7 @@ async def test_registry_dimensioned_matches_gold(case: Alignment) -> None:
 
 
 # 形态受控词表（L4 生成层按形态选 SQL 写法，见 prompts 的"形态 → SQL 写法"）
-USAGE_FORMS = ("整体类", "分组类", "占比类", "排名类", "人均类", "转化类")
+USAGE_FORMS = ("整体类", "分组类", "占比类", "排名类", "人均类", "转化类", "时间窗口类")
 
 # 比率类口径：必须统一以百分比表示（表示形式也是约定的一部分）
 RATIO_METRICS = ("复购率", "退款率", "下单转化率", "下单到支付转化率")
@@ -126,9 +127,7 @@ async def test_every_metric_declares_usage_form() -> None:
     assert not missing, f"以下口径没有标注形态：{missing}"
     for r in rows:
         head = (r["usage_hint"] or "").split("：")[0].split("/")[0].strip()
-        assert head in USAGE_FORMS, (
-            f"{r['metric_name']} 的形态 '{head}' 不在受控词表 {USAGE_FORMS}"
-        )
+        assert head in USAGE_FORMS, f"{r['metric_name']} 的形态 '{head}' 不在受控词表 {USAGE_FORMS}"
 
 
 async def test_ratio_metrics_use_percentage_convention() -> None:
@@ -141,7 +140,8 @@ async def test_ratio_metrics_use_percentage_convention() -> None:
     async with admin_pool().acquire() as conn:
         rows = await conn.fetch(
             "SELECT metric_name, sql_hint FROM biz.metric_definitions "
-            "WHERE metric_name = ANY($1::text[])", list(RATIO_METRICS),
+            "WHERE metric_name = ANY($1::text[])",
+            list(RATIO_METRICS),
         )
     found = {r["metric_name"] for r in rows}
     assert found == set(RATIO_METRICS), f"注册表缺少比率类口径：{set(RATIO_METRICS) - found}"
@@ -211,7 +211,8 @@ async def test_gold_shape_matches_question() -> None:
     assert not problems, (
         "以下用例的金标最外层 GROUP BY、但题面看不出分组意图——**必须逐条人工确认**：\n  "
         + "\n  ".join(problems)
-        + "\n\n处理方式：①若题面确实没问这个维度（如'退款率最高的渠道'却给全渠道排名）→ 改题面或金标；"
+        + "\n\n处理方式：①若题面确实没问这个维度"
+        "（如'退款率最高的渠道'却给全渠道排名）→ 改题面或金标；"
         "②若确认无误（如'…对比''…最高的小时'）→ 把 id 加进 REVIEWED_SHAPE_IDS。"
     )
 
@@ -224,19 +225,24 @@ async def test_refund_rate_denominator_is_paid_orders() -> None:
     async with admin_pool().acquire() as conn:
         hint = await _registry_hint(conn, "退款率")
         gold_sql = await _gold(conn, "整体退款率")
-        gold = float(await conn.fetchval(gold_sql))   # 注意：要执行，不是拿 SQL 文本比
-        paid_only = float(await conn.fetchval(
-            "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='refunded') "
-            "/ NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid','refunded')),0), 2) "
-            "FROM biz.orders"
-        ))
-        all_orders = float(await conn.fetchval(
-            "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='refunded') "
-            "/ COUNT(*), 2) FROM biz.orders"
-        ))
+        gold = float(await conn.fetchval(gold_sql))  # 注意：要执行，不是拿 SQL 文本比
+        paid_only = float(
+            await conn.fetchval(
+                "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='refunded') "
+                "/ NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid','refunded')),0), 2) "
+                "FROM biz.orders"
+            )
+        )
+        all_orders = float(
+            await conn.fetchval(
+                "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status='refunded') "
+                "/ COUNT(*), 2) FROM biz.orders"
+            )
+        )
     assert paid_only != all_orders, "两种分母应给出不同数值（否则本测试失去意义）"
     assert "('paid','refunded')" in hint, "注册表退款率的分母应限定为支付成功单"
     assert "('paid','refunded')" in gold_sql, "金标退款率的分母也必须限定为支付成功单"
     assert abs(gold - paid_only) < 0.01, (
-        f"金标退款率 {gold} 应等于「支付成功单为分母」的 {paid_only}，而不是「全部订单」的 {all_orders}"
+        f"金标退款率 {gold} 应等于「支付成功单为分母」的 {paid_only}，"
+        f"而不是「全部订单」的 {all_orders}"
     )

@@ -1,4 +1,5 @@
 """chart_gen 单测：三种图 + 安全转义 + 错误输入（零依赖，无需 DB）。"""
+
 from __future__ import annotations
 
 import pytest
@@ -39,13 +40,16 @@ class TestRender:
 
 
 class TestValidation:
-    @pytest.mark.parametrize("bad,desc", [
-        ([], "空列表"),
-        ([["a", "not-number"]], "非数值"),
-        ([[1, 2, 3]], "行过短"),
-        ([["a", 1]] * 25, "超过 MAX_POINTS"),
-        ("not-a-list", "非列表"),
-    ])
+    @pytest.mark.parametrize(
+        "bad,desc",
+        [
+            ([], "空列表"),
+            ([["a", "not-number"]], "非数值"),
+            ([[1, 2, 3]], "行过短"),
+            ([["a", 1]] * 25, "超过 MAX_POINTS"),
+            ("not-a-list", "非列表"),
+        ],
+    )
     def test_bad_data_rejected(self, bad: object, desc: str) -> None:
         with pytest.raises(ChartError):
             render_svg("bar", bad)  # type: ignore[arg-type]

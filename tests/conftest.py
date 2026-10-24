@@ -5,6 +5,7 @@
 "应触发澄清"的断言会在**第二次运行**时假失败（第一次写记忆、第二次命中记忆）。
 测试必须自己隔离持久状态，而不是假设"库是干净的"。
 """
+
 from __future__ import annotations
 
 import pytest
@@ -15,9 +16,23 @@ from app.infra.memory import ensure_memory_schema, forget_preferences
 
 # 集成测试使用的会话 ID（test_state_machine / test_memory 共用同一批约定）
 TEST_SESSIONS = (
-    "s1", "s2", "s3", "s4", "s5", "s6", "s7",
-    "mem-loop", "mem-hit", "mem-fresh", "mem-explicit",
-    "meta-1", "meta-2", "meta-3", "eval-city-1", "eval-city-2", "eval-city-3",
+    "s1",
+    "s2",
+    "s3",
+    "s4",
+    "s5",
+    "s6",
+    "s7",
+    "mem-loop",
+    "mem-hit",
+    "mem-fresh",
+    "mem-explicit",
+    "meta-1",
+    "meta-2",
+    "meta-3",
+    "eval-city-1",
+    "eval-city-2",
+    "eval-city-3",
 )
 
 

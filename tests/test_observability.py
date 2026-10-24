@@ -1,4 +1,5 @@
 """observability 单测：降级路径（CI 无 Langfuse key，必须零网络零异常）。"""
+
 from __future__ import annotations
 
 from app.core.config import get_settings

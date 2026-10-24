@@ -1,4 +1,5 @@
 """python_sandbox 单测：四条边界逐一验证（无需 DB / 无需网络）。"""
+
 from __future__ import annotations
 
 import pytest
@@ -37,10 +38,7 @@ class TestBoundaries:
 
     @pytest.mark.asyncio
     async def test_network_blocked(self) -> None:
-        r = await run_python(
-            "import socket\n"
-            "socket.create_connection(('8.8.8.8', 53), timeout=2)"
-        )
+        r = await run_python("import socket\nsocket.create_connection(('8.8.8.8', 53), timeout=2)")
         assert r["ok"] is False
         assert r["error_type"] == "blocked"
         assert "network is disabled" in r["error"]

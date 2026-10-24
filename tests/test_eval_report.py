@@ -5,6 +5,7 @@
 2. 闸门结论/终态/自愈次数字段齐全，报告失败明细确实有 SQL 列且截断 200 字；
 3. JSONL 逐题明细完整可回读（SQL 不截断）。
 """
+
 from __future__ import annotations
 
 import json
@@ -89,8 +90,14 @@ def test_自愈后成功的闸门结论是_passed_而不是_blocked():
         _exec_node(error="db"),
         _sql_node(good, retry=1),
         _exec_node(row_count=1),
-        {"event": "result", "status": "done", "summary": "app 3", "sql": good,
-         "rows": rows, "retry_count": 1},
+        {
+            "event": "result",
+            "status": "done",
+            "summary": "app 3",
+            "sql": good,
+            "rows": rows,
+            "retry_count": 1,
+        },
     ]
     rec = build_record(_q(rows=rows), 6, events, 20)
 
@@ -125,8 +132,12 @@ def test_成功记录包含结果哈希判定与闸门通过():
 
 def test_澄清与审批的终态可区分():
     clarify_events = [
-        {"event": "clarification", "type": "clarification",
-         "question": "销售额按 GMV 还是实付？", "options": ["GMV", "实付"]},
+        {
+            "event": "clarification",
+            "type": "clarification",
+            "question": "销售额按 GMV 还是实付？",
+            "options": ["GMV", "实付"],
+        },
     ]
     rec = build_record(_q("ambiguous"), 3, clarify_events, 10)
     assert rec["passed"] is True, "追问即通过（ambiguous 判据）"
@@ -135,8 +146,12 @@ def test_澄清与审批的终态可区分():
 
     approval_events = [
         _sql_node("SELECT * FROM biz.orders"),
-        {"event": "approval", "type": "approval",
-         "reason": "大表查询必须人工审批", "sql": "SELECT * FROM biz.orders"},
+        {
+            "event": "approval",
+            "type": "approval",
+            "reason": "大表查询必须人工审批",
+            "sql": "SELECT * FROM biz.orders",
+        },
     ]
     rec = build_record(_q("should_refuse"), 4, approval_events, 10)
     assert rec["status"] == "awaiting_approval"
@@ -150,14 +165,26 @@ def test_报告失败明细有_SQL_列且截断_200_字():
     events = [
         _sql_node(long_sql),
         _exec_node(error="unsafe"),
-        {"event": "error", "message": "被安全闸拒绝", "status": "failed",
-         "sql": long_sql, "retry_count": 0},
+        {
+            "event": "error",
+            "message": "被安全闸拒绝",
+            "status": "failed",
+            "sql": long_sql,
+            "retry_count": 0,
+        },
     ]
     rec = build_record(_q(), 5, events, 10)
     meta = {
-        "run_at": "2026-10-24 23:00", "model": "deepseek-chat", "llm_mode": "mock",
-        "prompt_version": "v1.2", "git_commit": "abcdef0", "total": 1,
-        "passed": 0, "accuracy": 0.0, "p95_latency_ms": 10, "cost_yuan": 0.0,
+        "run_at": "2026-10-24 23:00",
+        "model": "deepseek-chat",
+        "llm_mode": "mock",
+        "prompt_version": "v1.2",
+        "git_commit": "abcdef0",
+        "total": 1,
+        "passed": 0,
+        "accuracy": 0.0,
+        "p95_latency_ms": 10,
+        "cost_yuan": 0.0,
     }
     text = _report([rec], meta)
 
@@ -174,14 +201,27 @@ def test_jsonl_逐题明细完整可回读(tmp_path):
     events = [
         _sql_node(sql),
         _exec_node(row_count=1),
-        {"event": "result", "status": "done", "summary": "1", "sql": sql,
-         "rows": [[1]], "retry_count": 0},
+        {
+            "event": "result",
+            "status": "done",
+            "summary": "1",
+            "sql": sql,
+            "rows": [[1]],
+            "retry_count": 0,
+        },
     ]
     rec = build_record(_q(rows=[[1]]), 1, events, 10)
     meta = {
-        "run_at": "2026-10-24 23:00", "model": "deepseek-chat", "llm_mode": "mock",
-        "prompt_version": "v1.2", "git_commit": "abcdef0", "total": 1,
-        "passed": 1, "accuracy": 1.0, "p95_latency_ms": 10, "cost_yuan": 0.0,
+        "run_at": "2026-10-24 23:00",
+        "model": "deepseek-chat",
+        "llm_mode": "mock",
+        "prompt_version": "v1.2",
+        "git_commit": "abcdef0",
+        "total": 1,
+        "passed": 1,
+        "accuracy": 1.0,
+        "p95_latency_ms": 10,
+        "cost_yuan": 0.0,
     }
     path = tmp_path / "eval_x.jsonl"
     write_jsonl(path, [rec], meta)
@@ -197,16 +237,10 @@ def test_jsonl_逐题明细完整可回读(tmp_path):
 def test_自愈错误分类覆盖_db_细分():
     assert classify_heal_error("unsafe", "SELECT 不允许") == "闸门拒绝"
     assert classify_heal_error("timeout", "statement timeout") == "超时"
-    assert classify_heal_error(
-        "db", 'column "sale_amount" does not exist'
-    ) == "列不存在"
-    assert classify_heal_error(
-        "db", 'relation "biz.shipments" does not exist'
-    ) == "表不存在"
+    assert classify_heal_error("db", 'column "sale_amount" does not exist') == "列不存在"
+    assert classify_heal_error("db", 'relation "biz.shipments" does not exist') == "表不存在"
     assert classify_heal_error("db", 'syntax error at or near "FROM"') == "语法错误"
-    assert classify_heal_error(
-        "db", "permission denied for table queries"
-    ) == "权限拒绝"
+    assert classify_heal_error("db", "permission denied for table queries") == "权限拒绝"
     assert classify_heal_error("db", "connection reset") == "其他数据库错误"
 
 
@@ -220,14 +254,27 @@ def test_报告包含自愈分布表():
         _exec_node(error="db", error_msg='column "wrong" does not exist'),
         _sql_node("SELECT channel, 1 FROM biz.orders"),
         _exec_node(row_count=1),
-        {"event": "result", "status": "done", "summary": "x",
-         "sql": "SELECT channel, 1 FROM biz.orders", "rows": rows, "retry_count": 2},
+        {
+            "event": "result",
+            "status": "done",
+            "summary": "x",
+            "sql": "SELECT channel, 1 FROM biz.orders",
+            "rows": rows,
+            "retry_count": 2,
+        },
     ]
     rec = build_record(_q(rows=rows), 8, events, 10)
     meta = {
-        "run_at": "2026-10-25 00:30", "model": "deepseek-chat", "llm_mode": "real",
-        "prompt_version": "v1.3", "git_commit": "abcdef0", "total": 1,
-        "passed": 1, "accuracy": 1.0, "p95_latency_ms": 10, "cost_yuan": 0.0,
+        "run_at": "2026-10-25 00:30",
+        "model": "deepseek-chat",
+        "llm_mode": "real",
+        "prompt_version": "v1.3",
+        "git_commit": "abcdef0",
+        "total": 1,
+        "passed": 1,
+        "accuracy": 1.0,
+        "p95_latency_ms": 10,
+        "cost_yuan": 0.0,
     }
     text = _report([rec], meta)
 
@@ -254,4 +301,3 @@ async def test_单题超时不会挂死整轮(monkeypatch):
     assert rec["status"] == "failed"
     assert "超时" in (rec["error"] or "")
     assert rec["passed"] is False
-
