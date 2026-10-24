@@ -42,6 +42,17 @@ class TestDimensionIndex:
         # 渠道值也在
         assert ["orders", "channel"] in index.get("app", [])
 
+    async def test_metric_names_are_not_indexed_as_dimensions(self) -> None:
+        """口径名不是维度取值：索引后会让"客单价是多少"被误判成已限定。
+
+        DC-4 实测：metric_definitions.metric_name 是低基数 text 列，
+        被值索引收录后，"客单价"出现在问题里 → matched_values 非空 →
+        规则澄清误跳过。v2 缓存键 + SQL 排除该表修掉。
+        """
+        index = await load_dimension_index()
+        assert "客单价" not in index, "口径名被当成维度值了"
+        assert "复购率" not in index
+
     async def test_index_degrades_to_empty_dict_on_failure(self, monkeypatch) -> None:
         """降级：值索引是增强不是依赖，构建失败返回空词典而不是抛错。"""
         from app.tools import schema_search as mod

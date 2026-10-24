@@ -40,7 +40,8 @@ FULL_SCHEMA_MAX_TABLES = 10
 
 # 维度值索引：只索引 text/varchar 且 distinct ≤ 上限的列（低基数 = 维度）
 _DIM_MAX_DISTINCT = 50
-_DIM_INDEX_KEY = "datacrew:dim_index:v1"
+# v2：把 metric_definitions 排除出维度索引（口径名不是维度取值，见下）
+_DIM_INDEX_KEY = "datacrew:dim_index:v2"
 _DIM_INDEX_TTL_S = 3600
 _L1_TTL_S = 60.0
 _TEXT_COLUMNS_SQL = """
@@ -48,6 +49,10 @@ SELECT table_name, column_name
 FROM information_schema.columns
 WHERE table_schema = 'biz'
   AND data_type IN ('character varying', 'text', 'character')
+  -- 口径注册表是**知识**不是维度：把 metric_name 索引进"值 → 表列"词典后，
+  -- "客单价是多少"会被当成"已带维度过滤"（客单价 命中 metric_name 的值），
+  -- 规则澄清被误跳过。DC-4 实测发现，v2 缓存键强制重建。
+  AND table_name <> 'metric_definitions'
 ORDER BY table_name, column_name
 """
 # 标识符白名单：绝不把未校验的名字拼进 SQL（表/列名来自 information_schema，仍再校验一次）

@@ -36,6 +36,7 @@ from app.infra.memory import (
     remember_preference,
 )
 from app.tools.chart_gen import generate_chart
+from app.tools.schema_registry import match_clarification_rule
 from app.tools.schema_search import search_schema
 from app.tools.sql_execute import execute_sql
 
@@ -273,10 +274,53 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     session_id = state.get("session_id") or ""
     prefs = await load_preferences(session_id)
 
+    # 1.8 规则优先澄清（DC-4）：术语在注册表里对应多个口径、且问题没有限定词
+    #     -> 确定性 interrupt，不调用 LLM（省钱且行为稳定）。LLM 歧义判定
+    #     保留为补充：规则没命中时才看模型输出（见下方第 4 步）。
+    clarified = state.get("clarified_answer")
+    if not clarified:
+        rule = match_clarification_rule(question, schema_context)
+        if rule:
+            term = str(rule["term"])
+            options = [str(o) for o in rule["options"]]
+            remembered = prefs.get(term)
+            # 本轮问题里已经自己说出口径 -> 以当场表述为准，不套历史偏好
+            stated = any(explicitly_stated(question, o) for o in options)
+            if remembered and not stated:
+                # ---- 记忆命中：不打断用户，把偏好当作本轮澄清结果继续 ----
+                clarified = remembered
+                await mark_preference_used(session_id, term)
+                log.info(
+                    "clarification.rule_preference_applied",
+                    extra={"context": {"term": term, "choice": remembered[:40]}},
+                )
+            else:
+                answer = interrupt({
+                    "type": "clarification",
+                    "question": rule["question"],
+                    "options": options,
+                })
+                # 恢复执行时本节点从头重跑：clarified_answer 已注入，规则分支跳过，
+                # 进入下面的 LLM 分析（answerable/表路由仍需模型判断）。
+                log.info("clarification.rule_answered",
+                         extra={"context": {"term": term, "answer": str(answer)[:40]}})
+                await remember_preference(session_id, term, str(answer))
+                return {
+                    "schema_context": schema_context,
+                    "ambiguity": {
+                        "term": term,
+                        "options": options,
+                        "question": rule["question"],
+                    },
+                    "clarified_answer": str(answer),
+                    "status": "running",
+                    "trace": [_step("schema_curator", started, clarified="rule", term=term)],
+                }
+
     # 2. LLM 分析歧义（已有澄清回答时把回答并入问题，消除歧义）
     analysis_question = question
-    if state.get("clarified_answer"):
-        analysis_question = f"{question}（用户已明确：{state['clarified_answer']}）"
+    if clarified:
+        analysis_question = f"{question}（用户已明确：{clarified}）"
     # 当前日期注入：相对时间（昨天/最近7天）必须可推算，否则真实模型会以
     # "不知道今天几号"为由追问（真实评测 22/25 触发追问的事故之一）
     today = _today_cn()
@@ -319,9 +363,9 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
                             missing=missing, unresolved=unresolved)],
         }
 
-    # 4. 歧义处理：未澄清过才追问（澄清过的直接放行，防止死循环）
+    # 4. 歧义处理（LLM 补充）：规则没命中时才追问；已澄清过直接放行防死循环
     ambiguity = analysis.get("ambiguity")
-    if ambiguity and not state.get("clarified_answer"):
+    if ambiguity and not clarified:
         term = str(ambiguity.get("term") or "").strip()
         options = [str(o) for o in (ambiguity.get("options") or [])]
         remembered = prefs.get(term) if term else None
@@ -368,6 +412,9 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     return {
         "schema_context": schema_context,
         "ambiguity": ambiguity if ambiguity else None,
+        # 规则澄清的偏好命中时，本轮没有 interrupt，但下游 sql_generator 需要
+        # 知道"用户已明确"——所以这里把 effective 澄清结果写回状态。
+        "clarified_answer": clarified,
         "data_as_of": as_of,
         "status": "running",
         "trace": [_step("schema_curator", started, tables=len(schema_context.get("tables", [])))],
