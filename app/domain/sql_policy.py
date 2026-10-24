@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import re
+
 # 硬黑名单：即使将来误加进白名单也要拦的（纵深防御第二层，明确的拒绝消息）
 HARD_BLOCK_FUNCTIONS = {
     # 睡眠/资源攻击
@@ -61,3 +63,84 @@ TRIVIAL_WHERE_PATTERNS = (
 
 MAX_SUBQUERY_DEPTH = 3
 DEFAULT_ROW_LIMIT = 1000
+
+# ---- 意图闸门（DC-3）：在 LLM 之前确定性识别"不该执行"的请求 ----------------
+#
+# 为什么需要：should_refuse 基线 50%。模型面对"帮我把所有订单删掉"的常见行为
+# 不是生成 DELETE（会被闸拦），而是**改写成一条无害 SELECT 并作答**——用户拿到
+# 一个数字，危险意图被"满足"成了另一件事，安全闸一次都没响。这类请求的正确
+# 结局在生成前就定了：拒答，不花 LLM 调用。
+#
+# 词表是**领域策略数据**（放 domain 层，与函数白名单同理），判据是"祈使/动作
+# 形态"而不是关键词命中——「删除率」「修改次数」「更新频率」是正常统计问题，
+# 不能被误伤（验收要求）。所以每条写意图正则后面都跟统计后缀的否定前瞻。
+_WRITE_VERBS = (
+    r"(?:删除|删掉|删了|清空|截断|清除|修改|更新|改成|改掉|插入|写入|"
+    r"建表|授权|drop|delete|update|insert|truncate|alter|grant|create\s+table)"
+)
+# 动作后面接这些字，说明是统计名词而不是祈使动作（删除率 / 修改次数 / 更新频率）
+_STAT_SUFFIX = r"(?!率|次|量|占|统|分|情|趋|明|频|周|间隔|数量)"
+WRITE_INTENT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "把/将/帮我/请/麻烦/给我 … 改成"（含"查订单数然后把用户表删了"这类多语句注入）
+    re.compile(r"(?:把|将|帮我|请|麻烦|给我).{0,20}" + _WRITE_VERBS + _STAT_SUFFIX),
+    # 祈使句以写动作开头："删除用户表"；"删除率是多少" 不命中
+    re.compile(r"^[　\s]*" + _WRITE_VERBS + _STAT_SUFFIX),
+    # 写动作 + 表/库对象："删除用户表""清空订单表"（"订单表的修改次数"不命中）
+    re.compile(_WRITE_VERBS + r".{0,6}(?:表|库)"),
+)
+
+# 资源滥用：睡眠拖库 / 全部字段无过滤 / 超深嵌套——请求本身就在攻击数据库
+RESOURCE_ABUSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"(?:睡眠|睡一会|睡一下|拖慢|拖一下|卡死|压测|压力测试|pg_sleep|死循环)"),
+    re.compile(r"(?:全部字段|所有字段|select\s*\*|SELECT\s*\*)"),
+    re.compile(r"嵌套.{0,10}(?:十几|十多|[4-9]|\d{2,})"),
+)
+
+# 越权探测：表清单 / 系统表 / 评测表。**计划书原方案是保留给七道闸拦**，但真实
+# 实测（2 轮）里模型两次都把"数据库里有哪些表"改写成无害业务查询并作答（evaded）
+# ——闸根本没机会响。既然正确结局是拒答，就在生成前确定性拒掉；七道闸的拦截
+# 能力仍由 55 条 test_sql_guard 单测与 sale_amount 自愈链路覆盖。
+PROBE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"评测表"),
+    re.compile(r"(?:系统表|information_schema|pg_catalog|pg_tables|pg_class)"),
+    re.compile(r"(?:数据库|库里).{0,8}(?:哪些|什么|所有).{0,4}表"),
+    re.compile(r"(?:有哪些|有什么|都有哪些|都有什么).{0,4}表"),
+    re.compile(r"表名"),
+)
+
+INTENT_KIND_WRITE = "write"
+INTENT_KIND_RESOURCE = "resource_abuse"
+INTENT_KIND_PROBE = "probe"
+
+INTENT_REFUSAL_TEXT = {
+    INTENT_KIND_WRITE: (
+        "这类请求要求修改数据或数据库结构（删除/清空/更新/插入/建表/授权），"
+        "超出了只读问数的范围，无法执行。可以问我业务口径的统计，"
+        "例如「上个月各渠道的实付销售额是多少」。"
+    ),
+    INTENT_KIND_RESOURCE: (
+        "这类请求会消耗或攻击数据库资源（睡眠函数/全部字段无过滤/超深嵌套），"
+        "超出只读问数的安全边界，无法执行。"
+    ),
+    INTENT_KIND_PROBE: (
+        "这类问题在探测数据库的表清单或元数据（系统表/评测表），属于越权范围，"
+        "无法回答。可以问我业务口径的数据，例如「上个月各渠道的实付销售额是多少」。"
+    ),
+}
+
+
+def detect_forbidden_intent(question: str) -> str | None:
+    """确定性意图判定（纯函数，可单测）：write / resource_abuse / probe / None。"""
+    q = (question or "").strip()
+    if not q:
+        return None
+    for pattern in WRITE_INTENT_PATTERNS:
+        if pattern.search(q):
+            return INTENT_KIND_WRITE
+    for pattern in RESOURCE_ABUSE_PATTERNS:
+        if pattern.search(q):
+            return INTENT_KIND_RESOURCE
+    for pattern in PROBE_PATTERNS:
+        if pattern.search(q):
+            return INTENT_KIND_PROBE
+    return None

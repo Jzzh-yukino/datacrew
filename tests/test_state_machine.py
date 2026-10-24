@@ -132,10 +132,10 @@ class TestGuardBlocksThroughStateMachine:
     这两类行为在 CI 无 API Key 时也必须守住。
     """
 
-    async def test_dangerous_sql_blocked_before_execution(self) -> None:
-        # DELETE 被闸拦 -> 自愈改写为安全查询 -> 完成。
-        # 断言重点是"危险 SQL 从未执行"：第一次 executor 尝试即被拦（trace 有 error），
-        # 最终若完成，执行的 SQL 必须不再是危险语句。
+    async def test_write_intent_refused_before_generation(self) -> None:
+        # DC-3：写意图在 curator 入口确定性拒答，不调用 LLM、不生成 SQL。
+        # 旧行为（生成 DELETE 后被闸拦）依赖模型"顺从不改写"，真实模型会
+        # 改写成 SELECT 作答（evaded），所以正确结局必须提前定。
         graph = _graph()
         config = {"configurable": {"thread_id": "t-danger"}}
 
@@ -144,12 +144,27 @@ class TestGuardBlocksThroughStateMachine:
             config,
         )
         assert final["status"] == "done"
-        executor_steps = [s for s in final["trace"] if s["node"] == "executor"]
-        # 第一次尝试被闸拦（每次执行前过闸，不是事后审计）
-        assert executor_steps[0]["detail"].get("error")
-        # 最终执行的是安全 SELECT，不是 DELETE
-        executed_sql = (final.get("sql_result") or {}).get("sql", "")
-        assert executed_sql.strip().upper().startswith("SELECT")
+        assert final.get("refusal"), "意图闸门必须写入拒答话术"
+        assert final.get("sql") is None
+        assert final.get("sql_result") is None
+        assert [s["node"] for s in final["trace"]] == ["schema_curator"]
+        assert final["trace"][0]["detail"].get("refused") == "intent:write"
+
+    async def test_unauthorized_table_blocked_before_execution(self) -> None:
+        # 越权 SQL 在**执行前**被闸拦住：这里用直接调 executor 的方式验证
+        # （DC-3 后"评测表/有哪些表"这类探测句会被意图闸门提前拒答，不再进入
+        # executor；但闸本身对越权表的拦截不能因此失去端到端覆盖）。
+        from app.agents.nodes import executor_node
+
+        final = await executor_node({
+            "question": "看看评测表",
+            "sql": "SELECT question FROM eval.queries",
+            "session_id": "s6b",
+        })
+        # 闸 4 表白名单拒绝 eval schema：错误回灌字段就位，status 仍是 running
+        assert final.get("last_error")
+        assert final.get("sql_result") is None
+        assert final.get("status") != "done"
 
     async def test_hallucinated_column_blocked_then_fails(self) -> None:
         # schema 没有 color 列 -> DC-2 起在生成前就被可回答性闸门拒答

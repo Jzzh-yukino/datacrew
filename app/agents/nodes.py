@@ -27,6 +27,7 @@ from app.agents.prompts import (
 )
 from app.agents.state import AgentState
 from app.core.logging import get_logger
+from app.domain.sql_policy import INTENT_REFUSAL_TEXT, detect_forbidden_intent
 from app.infra.db import admin_pool  # noqa: TID252  数据截止日查询
 from app.infra.memory import (
     explicitly_stated,
@@ -233,7 +234,25 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     started = time.perf_counter()
     question = state["question"]
 
-    # 0. 元数据类问题 → 直接拒答（不检索、不调 LLM、不生成 SQL）
+    # 0. 写意图 / 资源滥用意图 → 确定性拒答（不调 LLM、不生成 SQL、不碰数据库）。
+    #    为什么放在生成前：模型的常见"安全行为"是把 DELETE 改写成 SELECT 再作答，
+    #    闸一次都没响，用户却拿到了一个"被满足成另一件事"的答复（DC-3）。
+    intent = detect_forbidden_intent(question)
+    if intent:
+        refusal = INTENT_REFUSAL_TEXT[intent]
+        log.info(
+            "schema.intent_refused",
+            extra={"context": {"question": question[:40], "kind": intent}},
+        )
+        return {
+            "refusal": refusal,
+            "schema_context": {"tables": [], "metrics": []},
+            "status": "done",
+            "insight": {"summary": refusal, "chart_data": []},
+            "trace": [_step("schema_curator", started, refused=f"intent:{intent}")],
+        }
+
+    # 0.5 元数据类问题 → 直接拒答（不检索、不调 LLM、不生成 SQL）
     if is_metadata_question(question):
         log.info("schema.metadata_refused", extra={"context": {"question": question[:40]}})
         return {
