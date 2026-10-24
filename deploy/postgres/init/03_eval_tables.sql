@@ -55,3 +55,28 @@ CREATE TABLE IF NOT EXISTS eval.runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_evalruns_runat ON eval.runs(run_at DESC);
+
+-- DC-1：逐题明细（可下钻）。eval.runs 只有汇总数字，回答不了"这题为什么错"；
+-- 把每题的 SQL、闸门结论、自愈次数、终态单独落表，报告失败时能直接 SQL 复现。
+-- generated_sql 不截断（报告里才截断到 200 字）：诊断需要原文。
+CREATE TABLE IF NOT EXISTS eval.run_items (
+    id              BIGSERIAL PRIMARY KEY,
+    run_id          INT NOT NULL REFERENCES eval.runs(id) ON DELETE CASCADE,
+    query_id        INT,
+    category        VARCHAR(32) NOT NULL,
+    question        TEXT NOT NULL,
+    passed          BOOLEAN NOT NULL,
+    reason          TEXT,
+    generated_sql   TEXT,
+    gate_outcome    VARCHAR(32),
+    gate_reason     TEXT,
+    self_heal_count INT NOT NULL DEFAULT 0,
+    status          VARCHAR(32),
+    latency_ms      INT,
+    error           TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_evalrunitems_runid ON eval.run_items(run_id);
+CREATE INDEX IF NOT EXISTS idx_evalrunitems_failed ON eval.run_items(run_id)
+    WHERE NOT passed;
+

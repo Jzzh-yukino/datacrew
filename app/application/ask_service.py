@@ -50,12 +50,18 @@ async def _node_events(
             if node == "__interrupt__":
                 continue
             step = (update.get("trace") or [{}])[-1]
-            yield {
+            event = {
                 "event": "node_done",
                 "node": node,
                 "latency_ms": step.get("latency_ms"),
                 "detail": step.get("detail", {}),
             }
+            # 生成节点的 SQL 一并带出：评测报告要能逐题回溯"到底生成了什么"
+            # （DC-1），前端时间线也据此展示自愈前后的 SQL 变化。失败路径
+            # 的 SQL 不在 result 事件里，只能靠这里留下每次尝试的痕迹。
+            if node == "sql_generator" and update.get("sql"):
+                event["sql"] = update["sql"]
+            yield event
 
 
 async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
@@ -68,10 +74,20 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
             return
     values = state.values
     if values.get("status") == "failed":
-        yield {"event": "error", "message": values.get("error", "查询失败")}
+        # 失败也要带出生成过的 SQL 与自愈次数：评测报告里"只记结果集不一致、
+        # 不记 SQL"等于不可诊断（DC-1 的直接动因）。字段对 SSE 客户端向后兼容。
+        yield {
+            "event": "error",
+            "message": values.get("error", "查询失败"),
+            "status": "failed",
+            "sql": values.get("sql"),
+            "retry_count": values.get("retry_count", 0),
+            "last_error": values.get("last_error"),
+        }
         return
     yield {
         "event": "result",
+        "status": "done",
         "summary": (values.get("insight") or {}).get("summary", ""),
         "sql": values.get("sql"),
         "columns": (values.get("sql_result") or {}).get("columns"),
@@ -79,6 +95,7 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
         "row_count": (values.get("sql_result") or {}).get("row_count"),
         "chart_url": (values.get("insight") or {}).get("chart_url"),
         "retry_count": values.get("retry_count", 0),
+        "refusal": values.get("refusal"),
     }
 
 
