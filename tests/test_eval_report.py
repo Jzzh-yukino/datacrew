@@ -14,6 +14,7 @@ from eval.runner import (
     SQL_PREVIEW_CHARS,
     _report,
     build_record,
+    classify_heal_error,
     write_jsonl,
 )
 
@@ -46,7 +47,7 @@ def test_失败记录带每次尝试的_SQL_与闸门归因():
     bad2 = "SELECT channel, sum(pay_amount) FROM biz.orders GROUP BY channel"
     events = [
         _sql_node(bad1, retry=0),
-        _exec_node(error="db"),
+        _exec_node(error="db", error_msg='column "sale_amount" does not exist'),
         _sql_node(bad2, retry=1),
         _exec_node(error="db"),
         {
@@ -68,6 +69,8 @@ def test_失败记录带每次尝试的_SQL_与闸门归因():
     assert rec["status"] == "failed"
     assert rec["self_heal_count"] == 2
     assert rec["heal_error_types"] == ["db", "db"]
+    assert rec["heal_errors"][0]["category"] == "列不存在"
+    assert rec["heal_errors"][1]["category"] == "其他数据库错误"
     assert rec["latency_ms"] == 1234
     assert rec["error"].startswith("查询失败")
 
@@ -189,3 +192,46 @@ def test_jsonl_逐题明细完整可回读(tmp_path):
     assert lines[1]["generated_sql"] == sql
     assert lines[1]["gate"]["outcome"] == "passed"
     assert len(lines) == 2
+
+
+def test_自愈错误分类覆盖_db_细分():
+    assert classify_heal_error("unsafe", "SELECT 不允许") == "闸门拒绝"
+    assert classify_heal_error("timeout", "statement timeout") == "超时"
+    assert classify_heal_error(
+        "db", 'column "sale_amount" does not exist'
+    ) == "列不存在"
+    assert classify_heal_error(
+        "db", 'relation "biz.shipments" does not exist'
+    ) == "表不存在"
+    assert classify_heal_error("db", 'syntax error at or near "FROM"') == "语法错误"
+    assert classify_heal_error(
+        "db", "permission denied for table queries"
+    ) == "权限拒绝"
+    assert classify_heal_error("db", "connection reset") == "其他数据库错误"
+
+
+def test_报告包含自愈分布表():
+    """DC-7：报告要回答"哪类错误在自愈、成功了没有"，而不只是总数。"""
+    rows = [["app", 1]]
+    events = [
+        _sql_node("SELECT wrong FROM biz.orders"),
+        _exec_node(error="db", error_msg='column "wrong" does not exist'),
+        _sql_node("SELECT channel FROM biz.orders"),
+        _exec_node(error="db", error_msg='column "wrong" does not exist'),
+        _sql_node("SELECT channel, 1 FROM biz.orders"),
+        _exec_node(row_count=1),
+        {"event": "result", "status": "done", "summary": "x",
+         "sql": "SELECT channel, 1 FROM biz.orders", "rows": rows, "retry_count": 2},
+    ]
+    rec = build_record(_q(rows=rows), 8, events, 10)
+    meta = {
+        "run_at": "2026-10-25 00:30", "model": "deepseek-chat", "llm_mode": "real",
+        "prompt_version": "v1.3", "git_commit": "abcdef0", "total": 1,
+        "passed": 1, "accuracy": 1.0, "p95_latency_ms": 10, "cost_yuan": 0.0,
+    }
+    text = _report([rec], meta)
+
+    assert "自愈分布（按错误类型）" in text
+    assert "| 列不存在 | 1 | 2 | 1 | 100% |" in text
+    assert "合计：1/1 题触发自愈，其中 1 题最终通过" in text
+

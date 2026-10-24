@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 import sqlglot
@@ -56,6 +57,26 @@ _LANGUAGE_CONSTRUCTS = tuple(
 
 class UnsafeSQLError(Exception):
     """SQL 未通过安全闸。message 会回灌给 Agent 驱动自愈。"""
+
+
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _function_names(func: exp.Func) -> set[str]:
+    """取出函数节点真正可能的名字（类型化节点用 sql_name，Anonymous 用 name）。
+
+    必须过滤非标识符：sqlglot 把 PERCENTILE_CONT(0.5) 的 ``func.name`` 解析成
+    参数 "0.5"，早期版把它当函数名报「未授权的函数: 0.5」——既无法诊断，
+    又掩盖了真正该报的 percentile_cont（DC-7 自愈统计里实测抓到）。
+    """
+    names: set[str] = set()
+    for raw in (func.sql_name(), func.name or ""):
+        text = str(raw or "").strip()
+        if not text or text.upper() == "ANONYMOUS":
+            continue
+        if _IDENT_RE.match(text):
+            names.add(text.lower())
+    return names
 
 
 @dataclass
@@ -256,11 +277,9 @@ def validate_sql(
         # 真危险函数一起漏掉（实测踩坑，攻击样本全部漏网）。
         if isinstance(func, _LANGUAGE_CONSTRUCTS):
             continue
-        candidates = {
-            n.lower()
-            for n in (func.sql_name(), func.name or "")
-            if n and n.upper() != "ANONYMOUS"
-        }
+        candidates = _function_names(func)
+        if not candidates:
+            continue
         hit = candidates & HARD_BLOCK_FUNCTIONS
         if hit:
             raise UnsafeSQLError(f"禁用危险函数: {sorted(hit)[0]}")

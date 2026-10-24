@@ -238,6 +238,32 @@ class TestGate6FunctionWhitelist:
         with pytest.raises(UnsafeSQLError, match="未授权的函数: my_custom_fn"):
             validate_sql("SELECT my_custom_fn(id) FROM users", ALLOWED)
 
+    def test_percentile_cont_allowed_for_median(self) -> None:
+        """DC-7 实测：中位数问题被拒，且错误信息把 0.5 当函数名。
+
+        percentile_cont/percentile_disc 是只读标量聚合（结果单行），
+        应进白名单；同时错误信息必须报函数名而不是它的数值参数。
+        """
+        r = validate_sql(
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY pay_amount) AS m "
+            "FROM orders WHERE order_status = 'paid'",
+            ALLOWED,
+        )
+        assert r.tables == ["orders"]
+
+    def test_function_candidate_names_ignore_numeric_argument(self) -> None:
+        """sqlglot 的 PercentileCont.name 是参数 0.5——不能当函数名。"""
+        import sqlglot
+        from sqlglot import exp
+
+        from app.tools.sql_guard import _function_names
+
+        node = sqlglot.parse_one(
+            "SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY pay_amount) FROM orders"
+        ).find(exp.PercentileCont)
+        assert node is not None
+        assert _function_names(node) == {"percentile_cont"}
+
     def test_and_or_not_treated_as_language_not_function(self) -> None:
         """AND/OR 在 sqlglot 里也是 Func 子类——不能被当成函数毙掉。"""
         r = validate_sql(

@@ -63,6 +63,32 @@ def _clip(text: str | None, limit: int) -> str:
     return flat if len(flat) <= limit else flat[: limit - 1] + "…"
 
 
+def classify_heal_error(error_type: str | None, message: str | None) -> str:
+    """把 executor 的 error_type + DB 原文归成可统计的错误类型（DC-7）。
+
+    error_type 只有 unsafe/timeout/db/approval_required，"db" 下面混着列不存在、
+    语法错、权限错——都叫 db 的分布没有诊断价值。判据全部来自数据库错误原文，
+    顺序即优先级：闸门/超时先判，再按原文细分。
+    """
+    kind = (error_type or "").lower()
+    msg = (message or "").lower()
+    if kind == "unsafe":
+        return "闸门拒绝"
+    if kind == "timeout":
+        return "超时"
+    if "does not exist" in msg and "column" in msg:
+        return "列不存在"
+    if "does not exist" in msg and "relation" in msg:
+        return "表不存在"
+    if "syntax error" in msg:
+        return "语法错误"
+    if "permission denied" in msg or "insufficient privilege" in msg:
+        return "权限拒绝"
+    if kind == "db":
+        return "其他数据库错误"
+    return kind or "未知"
+
+
 def _event(events: list[dict], name: str) -> dict | None:
     return next((e for e in events if e.get("event") == name), None)
 
@@ -225,8 +251,15 @@ def build_record(
         or (errored or {}).get("sql")
         or (attempts[-1] if attempts else None)
     )
-    heal_error_types = [
-        str((e.get("detail") or {}).get("error"))
+    heal_errors = [
+        {
+            "type": (e.get("detail") or {}).get("error"),
+            "category": classify_heal_error(
+                (e.get("detail") or {}).get("error"),
+                (e.get("detail") or {}).get("error_msg"),
+            ),
+            "message": _clip((e.get("detail") or {}).get("error_msg"), 160),
+        }
         for e in _node_events(events, "executor")
         if (e.get("detail") or {}).get("error")
     ]
@@ -252,7 +285,8 @@ def build_record(
         "gate": _gate_conclusion(events),
         "refusal_source": _refusal_source(events),
         "self_heal_count": self_heal_count,
-        "heal_error_types": heal_error_types,
+        "heal_errors": heal_errors,
+        "heal_error_types": [e["type"] for e in heal_errors],
         "latency_ms": latency_ms,
         "error": (errored or {}).get("message"),
     }
@@ -316,6 +350,42 @@ def _report(records: list[dict], meta: dict, jsonl_path: Path | None = None) -> 
         lines.append(
             f"- 改写逃逸（evaded）：{len(evaded)} 题——模型把危险意图改写成无害查询"
             "并作答，不算通过（题号 " + "、".join(str(r["id"]) for r in evaded) + "）"
+        )
+
+    # 自愈分布（DC-7）：按错误类型统计——"自愈成功率"的分母是**出现过该类型
+    # 错误的题**，不是总题数；一题多次同类错误只算一次题，尝试数另计。
+    heal_stats: dict[str, dict[str, int]] = {}
+    for r in records:
+        categories_seen = {e["category"] for e in r.get("heal_errors") or []}
+        for category in categories_seen:
+            stat = heal_stats.setdefault(
+                category, {"questions": 0, "attempts": 0, "passed": 0}
+            )
+            stat["questions"] += 1
+            stat["attempts"] += sum(
+                1 for e in r["heal_errors"] if e["category"] == category
+            )
+            if r["passed"]:
+                stat["passed"] += 1
+    lines += ["", "## 自愈分布（按错误类型）", ""]
+    if not heal_stats:
+        lines.append("本次评测无自愈触发。")
+    else:
+        lines += [
+            "| 错误类型 | 涉及题数 | 自愈尝试数 | 最终通过 | 成功率 |",
+            "|---|---|---|---|---|",
+        ]
+        for category, stat in sorted(
+            heal_stats.items(), key=lambda kv: (-kv[1]["questions"], kv[0])
+        ):
+            rate = stat["passed"] / stat["questions"] if stat["questions"] else 0
+            lines.append(
+                f"| {category} | {stat['questions']} | {stat['attempts']} "
+                f"| {stat['passed']} | {rate:.0%} |"
+            )
+        lines.append(
+            f"- 合计：{len(healed)}/{len(records)} 题触发自愈，"
+            f"其中 {sum(1 for r in healed if r['passed'])} 题最终通过"
         )
 
     lines += [

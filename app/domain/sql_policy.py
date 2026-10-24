@@ -35,6 +35,9 @@ ALLOWED_FUNCTIONS = {
     # 聚合（行数有界；数组/字符串收集类刻意不收，单行体积无界）
     "count", "sum", "avg", "min", "max", "stddev", "stddev_pop",
     "stddev_samp", "variance", "var_pop", "var_samp",
+    # 分位数聚合：中位数/百分位是只读标量聚合，结果单行（DC-7 评测发现
+    # "订单金额的中位数"被拒，错误信息还把 0.5 当成函数名——两个 bug 一起修）
+    "percentile_cont", "percentile_disc",
     # 算术/标量
     "round", "floor", "ceil", "ceiling", "abs", "mod", "power", "sqrt",
     "sign", "trunc", "exp", "ln", "log",

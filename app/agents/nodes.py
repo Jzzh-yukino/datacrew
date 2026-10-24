@@ -543,10 +543,16 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
                 "error": f"查询失败（已重试 {retry_count} 次）：{result.get('error')}",
                 "trace": [_step("executor", started, retries_exhausted=True)],
             }
-        # 错误回灌给 SQLGenerator 自愈
+        # 错误回灌给 SQLGenerator 自愈。error_msg 一并进 trace：DC-7 要按
+        # 错误类型统计自愈分布，而 "db" 太粗——列不存在/语法错/权限错都是 db，
+        # 归因必须看到数据库原文（截断 200 字，不进日志敏感面）。
         return {
             "last_error": result.get("error", "未知错误"),
-            "trace": [_step("executor", started, error=result.get("error_type"))],
+            "trace": [_step(
+                "executor", started,
+                error=result.get("error_type"),
+                error_msg=str(result.get("error", ""))[:200],
+            )],
         }
 
     return {
