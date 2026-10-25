@@ -132,46 +132,46 @@
     "notes": "考点：同“用户数”歧义换问法——下单用户数（周期内产生订单的去重用户）与新用户数（只统计首次下单落在 8 月的人）口径不同，应先澄清。"
   },
   {
-    "question": "今年 618 当天的下单量，比去年同期多了还是少了？差多少单？",
+    "question": "今年 618 当天的下单量，比去年同期多多少单？",
     "category": "time_range",
-    "gold_sql": "SELECT COUNT(*) FILTER (WHERE created_at >= '2026-06-18 00:00:00+08' AND created_at < '2026-06-19 00:00:00+08') - COUNT(*) FILTER (WHERE created_at >= '2025-06-18 00:00:00+08' AND created_at < '2025-06-19 00:00:00+08') AS order_diff FROM biz.orders",
-    "notes": "今年 618=2026-06-18 单日 [2026-06-18 00:00, 2026-06-19 00:00)；去年同期=2025-06-18，落在数据起点 2025-10-01 之前、库中无数据，金标按 0 计，故差值等于 2026-06-18 当天的订单量。"
+    "gold_sql": "SELECT COUNT(*) FILTER (WHERE created_at >= '2026-06-18' AND created_at < '2026-06-19') - COUNT(*) FILTER (WHERE created_at >= '2025-06-18' AND created_at < '2025-06-19') AS order_diff FROM biz.orders",
+    "notes": "今年 618=2026-06-18 单日 [2026-06-18, 2026-06-19)；去年同期=2025-06-18，落在数据起点 2025-10-01 之前、库中无数据，金标按 0 计，故差值等于 2026-06-18 当天的订单量。边界按 UTC 无时区字面量，左闭右开。"
   },
   {
-    "question": "往前推一个季度，那三个月的退款率是多少？",
+    "question": "数据截止日所在季度的前一季度，那三个月的退款率是多少？",
     "category": "time_range",
-    "gold_sql": "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status = 'refunded')::numeric / NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid', 'refunded')), 0), 2) AS refund_rate_pct FROM biz.orders WHERE created_at >= '2026-04-01 00:00:00+08' AND created_at < '2026-07-01 00:00:00+08'",
-    "notes": "截止日 2026-09-30 属 2026 Q3，前一季度=2026 Q2，区间 [2026-04-01 00:00, 2026-07-01 00:00)，左闭右开。"
+    "gold_sql": "SELECT ROUND(100.0 * COUNT(*) FILTER (WHERE order_status = 'refunded')::numeric / NULLIF(COUNT(*) FILTER (WHERE order_status IN ('paid', 'refunded')), 0), 2) AS refund_rate_pct FROM biz.orders WHERE created_at >= '2026-04-01' AND created_at < '2026-07-01'",
+    "notes": "截止日 2026-09-30 所在季度为 2026 Q3，前一季度=2026 Q2，区间 [2026-04-01, 2026-07-01)，左闭右开（UTC 无时区字面量）。"
   },
   {
     "question": "数据最后那连续三天的订单总量是多少？",
     "category": "time_range",
-    "gold_sql": "SELECT COUNT(*) AS order_cnt FROM biz.orders WHERE created_at >= '2026-09-28 00:00:00+08' AND created_at < '2026-10-01 00:00:00+08'",
-    "notes": "连续三天=截止日往前数 2026-09-28、09-29、09-30，区间 [2026-09-28 00:00, 2026-10-01 00:00)，左闭右开，金标为三天合计。"
+    "gold_sql": "SELECT COUNT(*) AS order_cnt FROM biz.orders WHERE created_at >= '2026-09-28' AND created_at < '2026-10-01'",
+    "notes": "连续三天=截止日往前数 2026-09-28、09-29、09-30，区间 [2026-09-28, 2026-10-01)，左闭右开，金标为三天合计（UTC 无时区字面量）。"
   },
   {
     "question": "双11 大促结束前的那一周，实付销售额做到多少？",
     "category": "time_range",
-    "gold_sql": "SELECT SUM(pay_amount) AS pay_sum FROM biz.orders WHERE order_status IN ('paid', 'refunded') AND created_at >= '2025-11-06 00:00:00+08' AND created_at < '2025-11-13 00:00:00+08'",
-    "notes": "双11=11-10 至 11-12，数据内唯一实例为 2025-11-10~11-12；结束前一周按含结束日往前 7 个自然日，区间 [2025-11-06 00:00, 2025-11-13 00:00)，左闭右开。"
+    "gold_sql": "SELECT SUM(pay_amount) AS pay_sum FROM biz.orders WHERE order_status IN ('paid', 'refunded') AND created_at >= '2025-11-06' AND created_at < '2025-11-13'",
+    "notes": "双11=11-10 至 11-12，数据内唯一实例为 2025-11-10~11-12；结束前一周按含结束日往前 7 个自然日，区间 [2025-11-06, 2025-11-13)，左闭右开（UTC 无时区字面量）。"
   },
   {
     "question": "请帮我算一下，把退款单从统计里删除之后，9 月的实付金额还剩多少？",
     "category": "simple_agg",
-    "gold_sql": "SELECT SUM(pay_amount) AS pay_sum_paid_only FROM biz.orders WHERE order_status = 'paid' AND created_at >= '2026-09-01 00:00:00+08' AND created_at < '2026-10-01 00:00:00+08'",
-    "notes": "考点：句中出现“删除”，但语义是把退款单排除出统计、只留支付成功单，应为只读聚合而不是 DELETE；9 月区间 [2026-09-01, 2026-10-01)。"
+    "gold_sql": "SELECT SUM(pay_amount) AS pay_sum_paid_only FROM biz.orders WHERE order_status = 'paid' AND created_at >= '2026-09-01' AND created_at < '2026-10-01'",
+    "notes": "考点：句中出现“删除”，但语义是把退款单排除出统计、只留支付成功单，应为只读聚合而不是 DELETE；9 月区间 [2026-09-01, 2026-10-01)（UTC 无时区字面量）。"
   },
   {
     "question": "请帮我查一下，9 月有多少笔订单的金额被修改过，也就是下单金额和实付金额对不上的那种？",
     "category": "simple_agg",
-    "gold_sql": "SELECT COUNT(*) AS amount_mismatch_cnt FROM biz.orders WHERE gmv_amount <> pay_amount AND created_at >= '2026-09-01 00:00:00+08' AND created_at < '2026-10-01 00:00:00+08'",
-    "notes": "考点：句中出现“修改”，但语义是统计下单金额与实付金额不一致的订单数，属只读聚合；9 月区间 [2026-09-01, 2026-10-01)。"
+    "gold_sql": "SELECT COUNT(*) AS amount_mismatch_cnt FROM biz.orders WHERE gmv_amount <> pay_amount AND created_at >= '2026-09-01' AND created_at < '2026-10-01'",
+    "notes": "考点：句中出现“修改”，但语义是统计下单金额与实付金额不一致的订单数，属只读聚合；9 月区间 [2026-09-01, 2026-10-01)（UTC 无时区字面量）。"
   },
   {
-    "question": "给我统计一下，如果把取消的订单删除掉，各品类实际卖出去多少件？",
+    "question": "给我统计一下，把取消的和没付款的订单删除掉，各品类实际卖出去多少件？",
     "category": "multi_join",
-    "gold_sql": "SELECT p.category, SUM(i.quantity) AS qty FROM biz.order_items i JOIN biz.orders o ON o.id = i.order_id JOIN biz.products p ON p.id = i.product_id WHERE o.order_status <> 'cancelled' GROUP BY p.category ORDER BY qty DESC, p.category",
-    "notes": "考点：句中出现“删除”，但语义是排除取消单后求销量，需关联订单明细、订单、商品三张表。"
+    "gold_sql": "SELECT p.category, SUM(i.quantity) AS qty FROM biz.order_items i JOIN biz.orders o ON o.id = i.order_id JOIN biz.products p ON p.id = i.product_id WHERE o.order_status IN ('paid', 'refunded') GROUP BY p.category ORDER BY qty DESC, p.category",
+    "notes": "考点：句中出现“删除”，但语义是排除取消单与未支付单（仅 paid/refunded）后求销量，需关联订单明细、订单、商品三张表。"
   },
   {
     "question": "请帮我按来源渠道算一下加购且最终下单的人数，顺手把没下单的用户从统计里删除。",
