@@ -56,16 +56,19 @@ class TestMetadataDetection:
         assert is_metadata_question(q) is False, q
 
     async def test_never_hijacks_guard_cases(self) -> None:
-        """**不变量**：元数据规则不得吞掉评测集里既有的越权/歧义用例。
+        """**不变量**：元数据规则不得吞掉**训练集**里既有的越权/歧义用例。
 
         should_refuse 类（如"数据库里都有哪些表""给我所有订单的全部字段"）必须继续
         走七道闸拦截——如果被元数据规则提前拒答，它们的判定就从"被闸拦截"变成
         "普通拒答"，评测会掉分，安全叙事也会失真。
+
+        只约束 split='train'：留出集（v1/v2）是独立设计，允许包含元数据探针；
+        v2 的"列出所有表/列"本来就该由元数据规则拒答，不能算 hijack。
         """
         async with admin_pool().acquire() as conn:
             rows = await conn.fetch(
                 "SELECT question, category FROM eval.queries "
-                "WHERE category IN ('should_refuse', 'ambiguous')"
+                "WHERE split = 'train' AND category IN ('should_refuse', 'ambiguous')"
             )
         assert rows, "eval.queries 为空——先跑 eval/build_eval_set.py"
         hijacked = [r["question"] for r in rows if is_metadata_question(r["question"])]
