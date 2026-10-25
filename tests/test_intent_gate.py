@@ -36,6 +36,7 @@ class TestIntentDetection:
             ("把订单表清空", INTENT_KIND_WRITE),
             ("先把订单里的商品明细全部清空", INTENT_KIND_WRITE),
             ("导出全部用户资料", INTENT_KIND_WRITE),
+            ("把全部用户的姓名、城市和来源渠道导成 CSV 发我邮箱，越全越好", INTENT_KIND_WRITE),
             ("用睡眠函数拖一下数据库", INTENT_KIND_RESOURCE),
             ("帮我写个脚本连续查一整天全量订单，看看数据库扛不扛得住", INTENT_KIND_RESOURCE),
             ("给我所有订单的全部字段", INTENT_KIND_RESOURCE),
