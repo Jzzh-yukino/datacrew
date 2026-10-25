@@ -1,6 +1,6 @@
-"""留出集 v1（RW-2）：30 题，写死在代码里，先提交再跑评测。
+"""留出集 v1（RW-2）+ v2（R2）：写死在代码/数据文件里，先提交再跑评测。
 
-出题原则（返工单 RW-2）：
+v1 出题原则（返工单 RW-2）：
 - 用**现有训练集没出现过**的概念/措辞：会员等级、积分、发票、门店、配送时长、
   广告投放、商品重量、用户性别；恶意说法换新句式；ambiguous 用注册表里
   多口径但不在现有 8 条规则里的“销售额/订单金额”。
@@ -8,8 +8,14 @@
   本文件只依赖 schema（`deploy/postgres/init/01_schema.sql`）与数据范围
   （2025-10-01 至 2026-09-30）。
 - 留出集跑完之前不得针对失败题改代码；要改只能再建 holdout v2。
+
+v2（返工单 §7 R2）由**独立隔离会话**出题，只给它 schema、数据画像与题面要求；
+产物逐字保存在 `eval/holdout_set_v2.json`，写入 `split='holdout_v2'`，与 v1 分开。
 """
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 from eval.result_hash import hash_rows
 
@@ -102,23 +108,43 @@ HOLDOUT: tuple[tuple[str, str, str, str], ...] = (
 
 async def seed_holdout(conn) -> int:
     """把留出题写入 eval.queries（split='holdout'），并算金标 result_hash。"""
+    return await _seed_questions(conn, HOLDOUT, "holdout")
+
+
+# ---------------------------------------------------------------- 留出集 v2（R2）
+#
+# 出题人：独立隔离会话（只读 schema、数据画像与题面要求，不看 v1 题目/失败明细/
+# 实现代码）。题面/金标逐字保存在 holdout_set_v2.json，本文件不改写。
+_V2_PATH = Path(__file__).with_name("holdout_set_v2.json")
+HOLDOUT_V2: tuple[tuple[str, str, str, str], ...] = tuple(
+    (item["question"], item["category"], item["gold_sql"], item["notes"])
+    for item in json.loads(_V2_PATH.read_text(encoding="utf-8"))
+)
+
+
+async def _seed_questions(conn, items, split: str) -> int:
     await conn.execute(
         "ALTER TABLE eval.queries ADD COLUMN IF NOT EXISTS"
         " split VARCHAR(16) NOT NULL DEFAULT 'train'"
     )
-    for question, category, gold_sql, notes in HOLDOUT:
+    for question, category, gold_sql, notes in items:
         rows = await conn.fetch(gold_sql)
         result_hash = hash_rows([dict(r) for r in rows])
         await conn.execute(
             """
             INSERT INTO eval.queries (question, category, gold_sql, result_hash, notes, split)
-            VALUES ($1, $2, $3, $4, $5, 'holdout')
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT (question, category) DO UPDATE
                SET gold_sql = EXCLUDED.gold_sql,
                    result_hash = EXCLUDED.result_hash,
                    notes = EXCLUDED.notes,
-                   split = 'holdout'
+                   split = EXCLUDED.split
             """,
-            question, category, gold_sql, result_hash, notes,
+            question, category, gold_sql, result_hash, notes, split,
         )
-    return len(HOLDOUT)
+    return len(items)
+
+
+async def seed_holdout_v2(conn) -> int:
+    """把留出集 v2 写入 eval.queries（split='holdout_v2'）并算金标哈希。"""
+    return await _seed_questions(conn, HOLDOUT_V2, "holdout_v2")
