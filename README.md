@@ -139,17 +139,7 @@ cd frontend; npm run build; npm test; cd ..
 # 7. 后续：demo / eval / 压测
 ```
 
-## 6. 构建路线图（每天 10h，AI 辅助编码）
-
-| 天 | 里程碑 | 验收标准 |
-|---|---|---|
-| D1 ✅ | 基础设施 + mock 数据 + MCP 工具层（七道闸） | 单 Agent 问数跑通；安全闸单测全过（28/28）；MCP 四工具逐一调用验证通过（smoke_mcp：正常查询/禁网/出图/错误输入） |
-| D2 ✅ | 四 Agent + Supervisor 状态机 + 澄清/自愈/人工审批 + SSE API | 33/33 测试通过（5 条控制流集成测试）；API 冒烟全过（鉴权/澄清恢复/审批恢复/LIMIT 兜底）；checkpointer 落 PG 实测读回 |
-| D3 ✅ | 120 条评测集 + 跑分调优 + 压测 + Streamlit demo + Compose | 评测集 120 条七类；mock 下安全类 20/20；P95 928ms；压测 QPS 1.9→18（并发 10）、P50 4.9s→300ms；Streamlit demo（澄清/审批交互）；compose app 服务 |
-| D4-D6 | （项目二 FinRAG，独立仓库） | — |
-| D7 | 两个项目收尾：CI、README、架构图、简历定稿、数字人工核验 | 每个简历数字能说出去源 |
-
-## 7. 设计决策日志（ADR）
+## 6. 设计决策日志（ADR）
 
 - **为什么 LangGraph 而不是自己写循环**：checkpointer 原生支持 interrupt/resume，human-in-the-loop 和"刷新页面不丢会话"开箱即得；且是大厂主流栈，面试同频。
 - **为什么项目一用 pgvector 而不是 Qdrant**：口径知识只有几百条，pgvector 省一个服务；项目二数据量大且需要 dense+sparse 混合检索，才上 Qdrant。选型跟着规模走，不跟风。
@@ -178,7 +168,7 @@ cd frontend; npm run build; npm test; cd ..
 - **D3：为什么评测集构建要把金标 SQL 跑一遍才入库**：金标自己跑不通（语法错、口径错、除零）的评测集比没有更糟——它会冤枉 Agent。构建脚本把"金标执行失败"当构建失败处理，90 条执行类金标全部实测通过才落库。
 - **D2：为什么 astream(updates) 的中断 chunk 不能直接当节点更新用**：langgraph 1.x 中断时产出 `{'__interrupt__': (Interrupt(...),)}`——值是 tuple，且中断点没有完整节点更新。中断事件统一从 `aget_state()` 的 `task.interrupts` 读取，`_node_events` 跳过该键。这是读源码确认的，文档没写。
 
-## 8. 安全设计速查
+## 7. 安全设计速查
 
 - SQL 七道闸：见 `app/tools/sql_guard.py`（D1 实现；`sql_execute.py` 是闸后的执行器）
 - 只读角色 `datacrew_ro`：见 `deploy/postgres/init/02_roles.sql`
@@ -188,7 +178,7 @@ cd frontend; npm run build; npm test; cd ..
 - 同 session 多轮提问：每轮开始重置上一轮产物字段（clarified_answer/error/sql/approval/…，thread_id=session_id 的恢复语义只对"一轮内的中断续跑"生效，不把上一轮答案漏进下一轮）；/ask/resume 先校验有没有挂起中断（无→409）再校验 value 形态与中断类型匹配（澄清要字符串、审批要对象）
 - 三级缓存：schema 白名单与口径定义走 L1 进程内（30s TTL）→ L2 Redis（1h）→ L3 PG information_schema；每级 miss 才落下一级，Redis 故障自动降级直查库——缓存是优化不是依赖
 
-## 9. D1 实测数据（简历数字的证据链）
+## 8. D1 实测数据（简历数字的证据链）
 
 > 纪律：每个进简历的数字都必须能说出去源。以下全部来自本机实测，可复现。
 >
@@ -218,7 +208,7 @@ cd frontend; npm run build; npm test; cd ..
   （50,000/500,000/735,831/200,000；双11 19,323 vs 1,262；Top100 1.2%；69 单上限）。
 - 2026-10-14 的 0.1 列为历史基线；DC-8 重灌 1.0 后已不再代表当前库。
 
-## 10. D2 实测数据（状态机 + API 的证据链）
+## 9. D2 实测数据（状态机 + API 的证据链）
 
 > LLM_MODE=mock（规则假模型）下实测，CI 无 API Key 可复现；真实模型只换 `LLM_MODE=real`。
 
@@ -240,7 +230,7 @@ cd frontend; npm run build; npm test; cd ..
 3. **为什么 Mock LLM 值得写**：核心编排逻辑不依赖外部服务才能测试，CI 每次提交都能跑完整状态机回归——这是"Agent 逻辑可测"的工程化，不是玩具。
 4. **审批的 LIMIT 包裹**：批准的是"允许扫表"，不是"允许把 50 万行灌进上下文"——审批粒度和资源边界是两件事。
 
-## 11. D3 实测数据（评测闭环的证据链）
+## 10. D3 实测数据（评测闭环的证据链）
 
 > LLM_MODE=mock 下实测（CI 无 API Key 可复现）。**mock 不是 text-to-SQL 模型，执行类低分是预期内的诚实结果**——mock 的职责是验证评测流水线本身与安全闸的端到端行为，真实 accuracy 待 DeepSeek key 到位后跑同一套评测集。
 
@@ -477,7 +467,7 @@ SQL 形状写成确定性提示注入生成 prompt（`app/agents/query_planner.p
 
 ---
 
-## 12. 记忆层实测数据（长期记忆的证据链）
+## 11. 记忆层实测数据（长期记忆的证据链）
 
 Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
 
@@ -487,7 +477,7 @@ Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
 | 短期记忆 | LangGraph checkpointer：任务状态（sql / insight / 澄清 / 审批 / retry） | 会话内、跨请求 | PG（thread_id = session_id） |
 | 长期记忆 | `mem.preferences`：会话级口径偏好（"销售额 = 实付"） | 跨轮次 | PG `mem` schema（**不对 datacrew_ro 授权**） |
 
-为什么长期记忆只做"偏好"、且**抽取不用 LLM**：澄清中断的 payload 已经带 `term/options`，用户回答就是 `(term → choice)`——**一条 upsert 即落库**。没有"结构化写入来源"的记忆（如把对话摘要塞进向量库）在没有召回场景时只增加故障面。设计细节见 §7 ADR D9。
+为什么长期记忆只做"偏好"、且**抽取不用 LLM**：澄清中断的 payload 已经带 `term/options`，用户回答就是 `(term → choice)`——**一条 upsert 即落库**。没有"结构化写入来源"的记忆（如把对话摘要塞进向量库）在没有召回场景时只增加故障面。设计细节见 §6 ADR D9。
 
 实测（`python eval/preference_probe.py`：双轮场景 + 反向对照）：
 
@@ -508,7 +498,7 @@ Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
 
 ---
 
-## 13. D2 修复实测（真实模型驱动的两个缺陷修复）
+## 12. D2 修复实测（真实模型驱动的两个缺陷修复）
 
 两个缺陷都**只在真实模型下现形**：mock 是规则假模型，既不会 JOIN 也不会误读"列/行"——又一个"mock 测管线、真实测质量"的实例。
 
@@ -522,7 +512,7 @@ Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
 
 | 阶段 | multi_join | metric_def | 说明 |
 |---|---|---|---|
-| 基线（§11 的 2026-10-01 全量跑分） | 12% | 33% | 120 条全量里的分项成绩 |
+| 基线（§10 的 2026-10-01 全量跑分） | 12% | 33% | 120 条全量里的分项成绩 |
 | 第一轮：逐症状修复（schema 覆盖 / 口径漂移 / 单位约定） | 40%（10/25） | 60%（9/15） | **修一个冒一个**：schema → 口径 → 单位，三次才收敛 |
 | **第二轮：按分层架构施工（ADR D12）** | **80.0%（20/25）** | **100.0%（15/15）** | 口径注册表升级为"口径 × 维度"模型（27 条 + 形态 + 反直觉约定）+ 判据形状不变量的两处题面/金标对齐 |
 
