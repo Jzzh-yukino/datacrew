@@ -160,12 +160,12 @@ class TestGate7BigTableRules:
         assert "LIMIT" not in r.sql.upper()
 
     def test_small_table_auto_limit(self) -> None:
-        r = validate_sql("SELECT name FROM users", ALLOWED)
+        r = validate_sql("SELECT city FROM users", ALLOWED)
         assert r.wrapped_limit
         assert "LIMIT 1000" in r.sql
 
     def test_explicit_limit_preserved(self) -> None:
-        r = validate_sql("SELECT name FROM users LIMIT 10", ALLOWED)
+        r = validate_sql("SELECT city FROM users LIMIT 10", ALLOWED)
         assert not r.wrapped_limit
 
 
@@ -190,7 +190,7 @@ class TestGate5SubqueryAndCase:
         assert r.tables == ["users"]
 
     def test_uppercase_unquoted_column_ok(self) -> None:
-        r = validate_sql("SELECT ID, Name FROM Users", ALLOWED)
+        r = validate_sql("SELECT ID, City FROM Users", ALLOWED)
         assert r.tables == ["users"]
 
     def test_quoted_mixed_case_table_rejected(self) -> None:
@@ -278,7 +278,7 @@ class TestGate6FunctionWhitelist:
     def test_and_or_not_treated_as_language_not_function(self) -> None:
         """AND/OR 在 sqlglot 里也是 Func 子类——不能被当成函数毙掉。"""
         r = validate_sql(
-            "SELECT id FROM users WHERE id > 1 AND name IS NOT NULL OR id < 0",
+            "SELECT id FROM users WHERE id > 1 AND city IS NOT NULL OR id < 0",
             ALLOWED,
         )
         assert r.tables == ["users"]
@@ -374,6 +374,35 @@ class TestGate7TrivialWhere:
     def test_real_where_skips_approval(self) -> None:
         r = validate_sql("SELECT id FROM orders WHERE created_at >= '2026-01-01'", ALLOWED)
         assert not r.needs_approval
+
+
+class TestGate5PII:
+    """Q12 真实事故：只读角色挡不住“读合法表里的敏感列”。
+
+    导出全部用户资料会被模型改写成 `SELECT name, city, channel_source FROM
+    biz.users`；意图闸门可以绕，PII 列策略绕不过——AST 里出现就拒。
+    """
+
+    def test_users_name_and_city_rejected(self) -> None:
+        with pytest.raises(UnsafeSQLError, match="敏感列"):
+            validate_sql("SELECT name, city FROM biz.users", ALLOWED)
+
+    def test_qualified_alias_rejected(self) -> None:
+        with pytest.raises(UnsafeSQLError, match="敏感列"):
+            validate_sql("SELECT u.name FROM biz.users u", ALLOWED)
+
+    def test_pii_in_filter_rejected(self) -> None:
+        with pytest.raises(UnsafeSQLError, match="敏感列"):
+            validate_sql("SELECT city FROM users WHERE name = '张三'", ALLOWED)
+
+    def test_product_name_allowed(self) -> None:
+        """products.name 是商品名，不是个人信息。"""
+        r = validate_sql("SELECT p.name FROM products p", ALLOWED)
+        assert r.tables == ["products"]
+
+    def test_non_pii_user_dimension_allowed(self) -> None:
+        r = validate_sql("SELECT city, COUNT(*) AS cnt FROM users GROUP BY city", ALLOWED)
+        assert r.tables == ["users"]
 
 
 class TestEndToEnd:

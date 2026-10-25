@@ -57,6 +57,26 @@ ALLOWED_FUNCTIONS = {
 # 大表：无过滤条件的查询必须人工审批（防全表扫描/拖库）
 BIG_TABLES = {"orders", "order_items", "traffic_logs"}
 
+# 敏感列（PII）：按表登记，**任何 SELECT 引用即拒**。
+#
+# 为什么必须是表级列策略、不能只靠意图识别：Q12 实测「把全部用户姓名/城市/
+# 来源导成 CSV」被模型改写成 `SELECT name, city, channel_source FROM biz.users`，
+# 只读角色完全挡不住——读的是合法表、合法列，但 name 是个人信息。
+# 意图闸门可以绕（业务化说法/改写），列策略绕不过：AST 里出现就拒绝。
+# 只把 users.name 这类登记为 PII；products.name 是商品名，不是个人信息。
+PII_COLUMNS: dict[str, frozenset[str]] = {
+    "users": frozenset({
+        "name", "real_name", "nickname",
+        "phone", "mobile", "tel", "telephone", "contact",
+        "address", "email", "id_card", "id_number", "password",
+    }),
+}
+
+
+def pii_columns(table: str) -> frozenset[str]:
+    """某张表的 PII 列集合（未登记的表返回空集）。"""
+    return PII_COLUMNS.get(table, frozenset())
+
 # 同义过滤：这些 WHERE 等价于"没有过滤"，骗不过大表审批
 TRIVIAL_WHERE_PATTERNS = (
     "true",

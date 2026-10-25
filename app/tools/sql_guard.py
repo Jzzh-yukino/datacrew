@@ -38,6 +38,7 @@ from app.domain.sql_policy import (
     DEFAULT_ROW_LIMIT,
     HARD_BLOCK_FUNCTIONS,
     MAX_SUBQUERY_DEPTH,
+    PII_COLUMNS,
     TRIVIAL_WHERE_PATTERNS,
 )
 
@@ -177,6 +178,18 @@ def _referenced_tables(stmt: exp.Expression) -> list[str]:
     return sorted(out)
 
 
+def _table_aliases(stmt: exp.Expression) -> dict[str, str]:
+    """别名/表名 -> 真实表名。用于把 `u.name` 解析到 users 再判 PII。"""
+    aliases: dict[str, str] = {}
+    for table in stmt.find_all(exp.Table):
+        name = _ident_key(table.this)
+        aliases[name] = name
+        alias = table.args.get("alias")
+        if alias is not None:
+            aliases[_ident_key(alias)] = name
+    return aliases
+
+
 def _derived_column_names(stmt: exp.Expression) -> set[str]:
     """本查询派生的列名：CTE 声明的输出列 + 各层 SELECT 的输出别名。
 
@@ -256,6 +269,7 @@ def validate_sql(
     for t in tables:
         allowed_cols |= allowed_tables[t]
     allowed_cols |= _derived_column_names(stmt)
+    aliases = _table_aliases(stmt)
     for col in stmt.find_all(exp.Column):
         if isinstance(col.this, exp.Star):
             continue  # t.* 已在上面按 Star 拒绝
@@ -263,6 +277,25 @@ def validate_sql(
         if key not in allowed_cols:
             raise UnsafeSQLError(
                 f"未授权的列: {key}（表 {tables} 的可用列见 schema 注册表）"
+            )
+        # 闸5b：PII 列策略（与意图识别无关，AST 里出现就拒）。
+        # 先按限定名/别名解析表；无限定列在单表查询里按该表判定，
+        # 多表时只要任一被引用表把该列登记为 PII 就拒（保守）。
+        owner: str | None = None
+        if col.table:
+            owner = aliases.get(str(col.table).casefold())
+        else:
+            owners = [t for t in tables if key in allowed_tables.get(t, set())]
+            if len(owners) == 1:
+                owner = owners[0]
+        pii_tables = [
+            t for t in ([owner] if owner else tables)
+            if key in PII_COLUMNS.get(t, frozenset())
+        ]
+        if pii_tables:
+            raise UnsafeSQLError(
+                f"禁止访问敏感列: {pii_tables[0]}.{key}（PII 列任何 SELECT 都"
+                "不允许导出；需要维度统计请用城市/渠道等非个人信息）"
             )
 
     # 闸6：函数白名单（硬黑名单优先）+ 嵌套深度
