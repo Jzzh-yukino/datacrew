@@ -133,6 +133,12 @@ _AMBIGUITY_TERMS: tuple[str, ...] = (
     "复购率", "订单量", "销量", "件单价", "占比", "频次", "人数", "金额",
 )
 
+# 注册表选项之外的显式限定词：用户已经说清口径时不再追问。
+# （"12 月的支付用户数"是支付口径，不是下单/购买二选一；训练集实测。）
+_EXTRA_QUALIFIERS: dict[str, tuple[str, ...]] = {
+    "用户数": ("支付", "付费", "活跃", "新增"),
+}
+
 
 def derive_clarification_rules(metrics: list[dict]) -> list[dict]:
     """从 metric_definitions 推导歧义规则（纯函数，可单测）。"""
@@ -156,7 +162,7 @@ def derive_clarification_rules(metrics: list[dict]) -> list[dict]:
             continue
         # 不把“整体”当口径限定词：它只表示范围，不选择 GMV/实付等口径
         # （v2 Q19“8 月的整体转化率”因此漏问）。
-        qualifiers: set[str] = set()
+        qualifiers: set[str] = set(_EXTRA_QUALIFIERS.get(term, ()))
         for m in matched:
             name = m.get("metric_name", "")
             if term in name:
