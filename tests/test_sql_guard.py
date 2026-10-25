@@ -51,7 +51,7 @@ class TestGate2SingleStatement:
             validate_sql("SELECT id FROM users; DROP TABLE users;", ALLOWED)
 
     def test_trailing_semicolon_ok(self) -> None:
-        r = validate_sql("SELECT id FROM users;", ALLOWED)
+        r = validate_sql("SELECT COUNT(*) FROM users;", ALLOWED)
         assert r.tables == ["users"]
 
 
@@ -160,12 +160,12 @@ class TestGate7BigTableRules:
         assert "LIMIT" not in r.sql.upper()
 
     def test_small_table_auto_limit(self) -> None:
-        r = validate_sql("SELECT city FROM users", ALLOWED)
+        r = validate_sql("SELECT id FROM products", ALLOWED)
         assert r.wrapped_limit
         assert "LIMIT 1000" in r.sql
 
     def test_explicit_limit_preserved(self) -> None:
-        r = validate_sql("SELECT city FROM users LIMIT 10", ALLOWED)
+        r = validate_sql("SELECT id FROM products LIMIT 10", ALLOWED)
         assert not r.wrapped_limit
 
 
@@ -186,12 +186,12 @@ class TestGate5SubqueryAndCase:
 
     def test_uppercase_unquoted_table_ok(self) -> None:
         """PG 折叠未加引号标识符：FROM USERS ≡ FROM users，必须放行。"""
-        r = validate_sql("SELECT id FROM USERS WHERE id = 1", ALLOWED)
+        r = validate_sql("SELECT COUNT(*) FROM USERS WHERE id = 1", ALLOWED)
         assert r.tables == ["users"]
 
     def test_uppercase_unquoted_column_ok(self) -> None:
-        r = validate_sql("SELECT ID, City FROM Users", ALLOWED)
-        assert r.tables == ["users"]
+        r = validate_sql("SELECT ID, Name FROM Products", ALLOWED)
+        assert r.tables == ["products"]
 
     def test_quoted_mixed_case_table_rejected(self) -> None:
         """加引号的 "Users" 在 PG 里是另一个对象，registry 没有就该拒。"""
@@ -278,10 +278,10 @@ class TestGate6FunctionWhitelist:
     def test_and_or_not_treated_as_language_not_function(self) -> None:
         """AND/OR 在 sqlglot 里也是 Func 子类——不能被当成函数毙掉。"""
         r = validate_sql(
-            "SELECT id FROM users WHERE id > 1 AND city IS NOT NULL OR id < 0",
+            "SELECT id FROM products WHERE id > 1 AND name IS NOT NULL OR id < 0",
             ALLOWED,
         )
-        assert r.tables == ["users"]
+        assert r.tables == ["products"]
 
     def test_cast_and_case_not_treated_as_function(self) -> None:
         r = validate_sql(
@@ -335,7 +335,7 @@ class TestGate4CteShadowing:
         assert r.tables == []
 
     def test_lateral_alias_column_ok(self) -> None:
-        r = validate_sql("SELECT g FROM users, LATERAL (SELECT 1 AS g) x", ALLOWED)
+        r = validate_sql("SELECT COUNT(*) FROM users, LATERAL (SELECT 1 AS g) x", ALLOWED)
         assert r.tables == ["users"]
 
 
@@ -343,11 +343,15 @@ class TestGate3SetOperations:
     """最终审查新增：纯 SELECT 的集合运算应放行（曾一律误杀且话术误导）。"""
 
     def test_union_all_allowed(self) -> None:
-        r = validate_sql("SELECT id FROM users UNION ALL SELECT user_id FROM orders", ALLOWED)
+        r = validate_sql(
+            "SELECT COUNT(*) FROM users UNION ALL SELECT COUNT(*) FROM orders", ALLOWED
+        )
         assert set(r.tables) == {"users", "orders"}
 
     def test_except_allowed(self) -> None:
-        r = validate_sql("SELECT id FROM users EXCEPT SELECT user_id FROM orders", ALLOWED)
+        r = validate_sql(
+            "SELECT COUNT(*) FROM users EXCEPT SELECT COUNT(*) FROM orders", ALLOWED
+        )
         assert set(r.tables) == {"users", "orders"}
 
     def test_union_with_write_branch_rejected(self) -> None:
@@ -402,6 +406,30 @@ class TestGate5PII:
 
     def test_non_pii_user_dimension_allowed(self) -> None:
         r = validate_sql("SELECT city, COUNT(*) AS cnt FROM users GROUP BY city", ALLOWED)
+        assert r.tables == ["users"]
+
+    def test_users_raw_rows_rejected(self) -> None:
+        """Q12 冒烟：`SELECT city, channel_source FROM users` 必须拒。"""
+        with pytest.raises(UnsafeSQLError, match="原始行"):
+            validate_sql("SELECT city, channel_source FROM users", ALLOWED)
+
+    def test_users_single_column_raw_still_rejected(self) -> None:
+        with pytest.raises(UnsafeSQLError, match="原始行"):
+            validate_sql("SELECT id FROM users", ALLOWED)
+
+    def test_users_join_raw_rejected(self) -> None:
+        with pytest.raises(UnsafeSQLError, match="原始行"):
+            validate_sql(
+                "SELECT u.city, o.id FROM users u JOIN orders o ON o.user_id = u.id",
+                ALLOWED,
+            )
+
+    def test_users_distinct_allowed(self) -> None:
+        r = validate_sql("SELECT DISTINCT city FROM users", ALLOWED)
+        assert r.tables == ["users"]
+
+    def test_users_count_allowed(self) -> None:
+        r = validate_sql("SELECT COUNT(*) AS cnt FROM users", ALLOWED)
         assert r.tables == ["users"]
 
 

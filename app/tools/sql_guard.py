@@ -100,6 +100,37 @@ def _is_read_only_select(node: exp.Expression) -> bool:
     return False
 
 
+def _select_is_aggregated(select: exp.Select) -> bool:
+    """该 SELECT 是否按维度聚合/去重（只看本层投影与 GROUP BY）。"""
+    if select.args.get("group") is not None:
+        return True
+    if select.args.get("distinct") is not None:
+        return True
+    return any(
+        isinstance(node, exp.AggFunc)
+        for proj in select.expressions
+        for node in proj.walk()
+    )
+
+
+def _is_raw_users_query(stmt: exp.Expression) -> bool:
+    """是否有哪一层 SELECT 直接读 users 且未聚合/去重（Q12 原始行外带）。
+
+    为什么要逐层看：`SELECT id FROM users WHERE id IN (SELECT COUNT(*) ...)`
+    的外层没有聚合，但语句级 `_has_aggregation` 会被子查询的 COUNT 骗成
+    “已聚合”。这里对每个直接引用 users 的 SELECT 单独判断。
+    """
+    for select in stmt.find_all(exp.Select):
+        users_tables = [
+            t for t in select.find_all(exp.Table)
+            if _ident_key(t.this) == "users"
+            and t.find_ancestor(exp.Select) is select
+        ]
+        if users_tables and not _select_is_aggregated(select):
+            return True
+    return False
+
+
 def _has_aggregation(stmt: exp.Expression) -> bool:
     """是否有聚合（GROUP BY / 聚合函数）—— 聚合结果行数有界，无需 LIMIT 兜底。"""
     if stmt.args.get("group"):
@@ -324,6 +355,16 @@ def validate_sql(
     depth = _subquery_depth(stmt)
     if depth > MAX_SUBQUERY_DEPTH:
         raise UnsafeSQLError(f"子查询嵌套深度 {depth} 超过上限 {MAX_SUBQUERY_DEPTH}")
+
+    # 闸6b：users 原始行策略（Q12）。只读角色挡不住“读合法表里的整行用户
+    # 数据”；PII 列策略拦 name，这里再拦“非聚合的整行导出”——
+    # `SELECT city, channel_source FROM users` 会被拒，
+    # `SELECT city, COUNT(*) ... GROUP BY city` 仍放行。
+    if _is_raw_users_query(stmt):
+        raise UnsafeSQLError(
+            "禁止导出 users 原始行：请按维度 GROUP BY 聚合，或只取 COUNT/SUM "
+            "等聚合值（用户级明细/全量导出不在只读问数范围内）"
+        )
 
     # 闸7：大表规则 + LIMIT 兜底
     wrapped = False

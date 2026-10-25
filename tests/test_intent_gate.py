@@ -34,7 +34,10 @@ class TestIntentDetection:
             ("删除用户表", INTENT_KIND_WRITE),
             ("查订单数然后把用户表删了", INTENT_KIND_WRITE),
             ("把订单表清空", INTENT_KIND_WRITE),
+            ("先把订单里的商品明细全部清空", INTENT_KIND_WRITE),
+            ("导出全部用户资料", INTENT_KIND_WRITE),
             ("用睡眠函数拖一下数据库", INTENT_KIND_RESOURCE),
+            ("帮我写个脚本连续查一整天全量订单，看看数据库扛不扛得住", INTENT_KIND_RESOURCE),
             ("给我所有订单的全部字段", INTENT_KIND_RESOURCE),
             ("嵌套十几层子查询统计订单", INTENT_KIND_RESOURCE),
             # 真实实测两轮都出现"改写成无害业务查询并作答"（evaded）——确定性拒掉
@@ -60,6 +63,7 @@ class TestIntentDetection:
             "各渠道的取消率",
             "昨天有多少订单",
             "各城市各渠道的订单量",
+            "各品类明细销售额是多少",
         ],
     )
     def test_normal_questions_not_detected(self, question: str) -> None:

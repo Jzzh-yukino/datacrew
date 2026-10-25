@@ -154,7 +154,9 @@ def derive_clarification_rules(metrics: list[dict]) -> list[dict]:
         hints = {m.get("sql_hint") or m.get("definition") for m in matched}
         if len(hints) < 2:
             continue
-        qualifiers: set[str] = {"整体"}
+        # 不把“整体”当口径限定词：它只表示范围，不选择 GMV/实付等口径
+        # （v2 Q19“8 月的整体转化率”因此漏问）。
+        qualifiers: set[str] = set()
         for m in matched:
             name = m.get("metric_name", "")
             if term in name:
@@ -184,6 +186,20 @@ CLARIFICATION_RULES: tuple[dict, ...] = ()
 _SCALAR_MARKERS = ("是多少", "有多少", "怎么样", "多少", "如何", "多大")
 _GROUPING_RE = re.compile(r"(?:各|按|每|分\s*组|分渠道|分城市|分品类|分组)")
 
+# 业务同义词 → 注册表术语（v2 Q17/Q18/Q21/Q22 的自然说法）。
+# 只做“词面 → 术语”映射，不新增口径；命中后仍走注册表规则与限定词判断。
+_TERM_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "用户数": ("多少用户", "用户数量", "用户量", "用户总数"),
+    "销售额": ("卖了多少钱", "卖了多少"),
+    "转化率": ("转化比例", "转化水平"),
+}
+
+
+def _term_hit(term: str, question: str) -> bool:
+    return term in question or any(
+        synonym in question for synonym in _TERM_SYNONYMS.get(term, ())
+    )
+
 
 def match_clarification_rule(
     question: str, schema_context: dict
@@ -203,12 +219,12 @@ def match_clarification_rule(
     if _GROUPING_RE.search(q) or re.search(
         r"(?:占比|比例|排名|最大|最小|前\s*\d+|Top|分布|趋势|贡献"
         r"|今天|昨天|最近|本月|上月|上个月|当天|周末|工作日"
-        r"|双11|双 11|618|国庆|季度|\d+\s*月)",
+        r"|双11|双 11|618|国庆|季度)",
         q, re.I,
     ):
         return None
     for rule in derive_clarification_rules(metrics):
-        if rule["term"] not in q:
+        if not _term_hit(rule["term"], q):
             continue
         if any(k in q for k in rule.get("qualifier_keywords", ())):
             continue

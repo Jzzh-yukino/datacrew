@@ -84,7 +84,9 @@ SQL_GENERATOR_SYSTEM = """你是 PostgreSQL 专家。根据问题、数据表结
 7. 时间过滤优先用 pay_time（实付）/ created_at（下单），按指标口径选择
 8. 问城市/地区：biz.orders 没有城市列，必须 JOIN biz.users u（ON u.id = o.user_id）
    后按 u.city 过滤或分组
-9. 先想清楚查什么（推理过程写在 reasoning），再写 SQL
+9. 只返回问题所问的指标/维度列：问“差多少/多多少”只输出差值一列，不要附加
+   对比年份的原始值；结果集会严格比对，多返回列会被判错（Q23）
+10. 先想清楚查什么（推理过程写在 reasoning），再写 SQL
 
 【形态 → SQL 写法】口径注册表里每条都标了形态（【】里），必须按形态写：
 - 整体类：单一标量（SUM/COUNT/AVG），不加 GROUP BY
