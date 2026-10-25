@@ -127,6 +127,9 @@ async def _seed_questions(conn, items, split: str) -> int:
         "ALTER TABLE eval.queries ADD COLUMN IF NOT EXISTS"
         " split VARCHAR(16) NOT NULL DEFAULT 'train'"
     )
+    # 该 split 以本文件为唯一事实源：先清旧行，避免改题后旧题残留
+    # （R2 修正 7 题时踩过：旧问句 upsert 不到，留下 3 条旧题）
+    await conn.execute("DELETE FROM eval.queries WHERE split = $1", split)
     for question, category, gold_sql, notes in items:
         rows = await conn.fetch(gold_sql)
         result_hash = hash_rows([dict(r) for r in rows])
