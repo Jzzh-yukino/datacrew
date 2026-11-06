@@ -26,6 +26,11 @@ from app.infra.cache import healthcheck as redis_health
 from app.infra.cache import token_bucket
 from app.infra.db import close_pools, init_pools
 from app.infra.db import healthcheck as pg_health
+from app.infra.dialogue_memory import (
+    api_key_fingerprint,
+    ensure_dialogue_memory_schema,
+    flush_dialogue_memory,
+)
 from app.infra.memory import ensure_memory_schema
 from app.infra.storage import get_storage
 
@@ -40,8 +45,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await init_pools()
     # 记忆表幂等创建（已存在则 no-op）：老库/CI 库不必手工跑 DDL 就能获得记忆能力
     await ensure_memory_schema()
+    await ensure_dialogue_memory_schema()
     log.info("api.started")
     yield
+    await flush_dialogue_memory()
     await close_pools()
     from app.agents.supervisor import close_checkpointer
     from app.infra.cache import close_redis
@@ -135,7 +142,7 @@ async def ask_endpoint(
 
     async def gen() -> AsyncIterator[str]:
         try:
-            async for event in ask(question, session_id):
+            async for event in ask(question, session_id, api_key_fingerprint(api_key)):
                 yield _sse(event)
         except Exception as e:  # 兜底：任何未预期错误都以 SSE 错误事件返回，不挂断连接
             log.exception("ask.failed")
@@ -169,7 +176,9 @@ async def resume_endpoint(
 
     async def gen() -> AsyncIterator[str]:
         try:
-            async for event in resume(session_id, body["value"]):
+            async for event in resume(
+                session_id, body["value"], api_key_fingerprint(api_key)
+            ):
                 yield _sse(event)
         except Exception as e:
             log.exception("resume.failed")

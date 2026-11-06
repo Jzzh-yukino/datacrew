@@ -13,6 +13,14 @@ from langgraph.types import Command
 
 from app.agents.supervisor import build_production_graph
 from app.core.logging import get_logger
+from app.infra.dialogue_memory import (
+    augment_question,
+    build_memory_context,
+    dialogue_lock,
+    extract_memory_from_turn,
+    load_dialogue_memory,
+    save_dialogue_memory,
+)
 
 log = get_logger(__name__)
 
@@ -33,6 +41,29 @@ async def _get_graph():
 def _config(session_id: str) -> dict[str, Any]:
     # thread_id = session_id：同一会话的状态在 checkpointer 里跨请求延续
     return {"configurable": {"thread_id": session_id}}
+
+
+async def _save_turn(
+    graph,
+    session_id: str,
+    api_key_hash: str,
+    question: str,
+    previous_memory: dict[str, Any] | None,
+) -> None:
+    """图结束后把本轮 focus/摘要写回短期记忆；失败不影响已发出的结果。"""
+    try:
+        state = await graph.aget_state(_config(session_id))
+        values = dict(state.values or {})
+    except Exception as e:
+        log.warning("dialogue.state_read_failed", extra={"context": {"reason": str(e)[:100]}})
+        return
+    try:
+        memory = extract_memory_from_turn(
+            question or str(values.get("question") or ""), values, previous_memory
+        )
+        await save_dialogue_memory(session_id, api_key_hash, memory)
+    except Exception as e:
+        log.warning("dialogue.save_turn_failed", extra={"context": {"reason": str(e)[:100]}})
 
 
 async def _node_events(
@@ -111,6 +142,7 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
 # trace 是 operator.add 累积通道（刻意保留全量排查询链），不重置。
 _FRESH_TURN_FIELDS: dict[str, Any] = {
     "clarified_answer": None,
+    "dialogue_context": None,
     "schema_context": None,
     "ambiguity": None,
     "data_as_of": None,
@@ -138,21 +170,42 @@ async def _reset_turn_state(graph, session_id: str) -> None:
         log.warning("ask.reset_failed", extra={"context": {"reason": str(e)[:100]}})
 
 
-async def ask(question: str, session_id: str) -> AsyncIterator[dict[str, Any]]:
+async def ask(
+    question: str,
+    session_id: str,
+    api_key_hash: str = "default",
+) -> AsyncIterator[dict[str, Any]]:
     """问一次：驱动状态机跑到底或跑到中断点，全程产出 SSE 事件。"""
     graph = await _get_graph()
     log.info("ask.start", extra={"context": {"session_id": session_id}})
-    await _reset_turn_state(graph, session_id)
-    async for ev in _node_events(
-        graph.astream(
-            {"question": question, "session_id": session_id, "status": "running"},
-            _config(session_id),
-            stream_mode="updates",
-        )
-    ):
-        yield ev
-    async for ev in _events_after_stream(graph, _config(session_id)):
-        yield ev
+    async with dialogue_lock(session_id, api_key_hash) as acquired:
+        if not acquired:
+            yield {
+                "event": "error",
+                "status": "failed",
+                "message": "当前会话上一条请求还在处理，请稍后重试",
+            }
+            return
+        memory = await load_dialogue_memory(session_id, api_key_hash)
+        graph_question = augment_question(question, memory)
+        context = build_memory_context(memory, question)
+        await _reset_turn_state(graph, session_id)
+        async for ev in _node_events(
+            graph.astream(
+                {
+                    "question": graph_question,
+                    "session_id": session_id,
+                    "dialogue_context": context,
+                    "status": "running",
+                },
+                _config(session_id),
+                stream_mode="updates",
+            )
+        ):
+            yield ev
+        async for ev in _events_after_stream(graph, _config(session_id)):
+            yield ev
+        await _save_turn(graph, session_id, api_key_hash, question, memory)
 
 
 async def pending_interrupt(session_id: str) -> dict | None:
@@ -172,15 +225,30 @@ async def pending_interrupt(session_id: str) -> dict | None:
                    extra={"context": {"reason": str(e)[:80]}})
     return None
 
-async def resume(session_id: str, value: Any) -> AsyncIterator[dict[str, Any]]:
+async def resume(
+    session_id: str,
+    value: Any,
+    api_key_hash: str = "default",
+) -> AsyncIterator[dict[str, Any]]:
     """恢复执行：把用户的澄清回答 / 审批决定注入中断点，继续跑。"""
     graph = await _get_graph()
     log.info("ask.resume", extra={"context": {"session_id": session_id}})
-    async for ev in _node_events(
-        graph.astream(
-            Command(resume=value), _config(session_id), stream_mode="updates"
-        )
-    ):
-        yield ev
-    async for ev in _events_after_stream(graph, _config(session_id)):
-        yield ev
+    async with dialogue_lock(session_id, api_key_hash) as acquired:
+        if not acquired:
+            yield {
+                "event": "error",
+                "status": "failed",
+                "message": "当前会话上一条请求还在处理，请稍后重试",
+            }
+            return
+        memory = await load_dialogue_memory(session_id, api_key_hash)
+        async for ev in _node_events(
+            graph.astream(
+                Command(resume=value), _config(session_id), stream_mode="updates"
+            )
+        ):
+            yield ev
+        async for ev in _events_after_stream(graph, _config(session_id)):
+            yield ev
+        question = (memory or {}).get("last_user_text") or ""
+        await _save_turn(graph, session_id, api_key_hash, question, memory)

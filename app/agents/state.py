@@ -40,6 +40,7 @@ class AgentState(TypedDict, total=False):
     question: str
     session_id: str
     clarified_answer: str | None   # 用户对澄清问题的回答（resume 时注入）
+    dialogue_context: dict[str, Any] | None  # 应用层注入的短期记忆，只读
 
     # ---- SchemaCurator 产物 ----
     schema_context: dict[str, Any]     # {"tables": [...], "metrics": [...]}

@@ -1,7 +1,7 @@
-# DataCrew 验收矩阵（双项目优化方案 DC-0…DC-9 + L4 规划）
+# DataCrew 验收矩阵（双项目优化方案 DC-0…DC-9 + MEM-1 + L4 规划）
 
 > 每一项指到「代码 / 测试 / 数字证据 / 提交」。数字来自 `reports/` 与 `eval.runs`。
-> 最近更新：2026-10-25。
+> 最近更新：2026-11-06。
 
 | 任务 | 交付 | 验证/数字 | 提交 |
 |---|---|---|---|
@@ -15,13 +15,14 @@
 | DC-7 | 自愈分布按错误类型统计 + percentile 闸修复 | `reports/self_heal_distribution.md` | `8068270` |
 | DC-8 | 50 万订单分层压测 + checkpointer 池 10→30；P50 4924→194ms、QPS 1.9→27.6 | `reports/load_test_analysis.md`；README §11 | `d9c91ff` |
 | DC-9 | 全量 120 题真实评测 **97/120 = 80.8%**（Q1–Q7 后，分类别见报告）+ 留出集 v2 **29/30 = 96.7%**；pytest 301 | `b153444`、R2 |
+| MEM-1 | Redis 短期对话记忆（focus/候选 + 30min TTL + PG 摘要兜底；默认关闭） | `tests/test_dialogue_memory.py`（12 项）；Redis/PG 回填、同 session 锁、ask 注入 | 本轮 |
 | L4 | 组合查询规划提示（多维/筛选+排名/占比/双条件/转化） | `tests/test_query_planner.py`（6 条）；pytest 249；multi_join 25 题真实子集 72%→80%→84% | 本轮 |
 
 ## 当前门禁
 
 - `ruff check app eval scripts` 全绿
-- `pytest tests/ -q`：**301 passed**
-- 前端 `npm test`（55 项）与 `npm run build`：历史全绿（本轮未改前端）
+- `pytest tests/ -q`：**313 passed**
+- 前端 `npm test`（55 项）与 `npm run build`：全绿（本轮只改后端；已复跑）
 - 两仓库 `git status` clean
 
 ## 已知边界（不藏）

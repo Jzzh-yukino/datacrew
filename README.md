@@ -162,6 +162,8 @@ cd frontend; npm run build; npm test; cd ..
 - **D11：评测集自己在骗我——口径漂移（退款率分母）**：`整体退款率` 与 `退款率最高的渠道` 两题在**历史每一份评测报告里都是失败的**（2026-09-29 起逐份可见）。排查后确认不是模型不行：**注册表定义与金标 SQL 是两套口径**——注册表写"退款单 / **支付成功单**"（`order_status IN ('paid','refunded')`），金标用 `COUNT(*)`（**全部订单**）。两种分母给出的数值确实不同（app 渠道 **5.70% vs 5.11%**），而真实模型**严格照注册表作答**——**越守规矩越被判错**，这条用例在当前配置下不可能通过。同类问题还有 `连带率`：**根本没有注册**，金标用 `AVG(quantity)`（平均每**行**件数），模型按题面括注"平均每单件数"算 `SUM(quantity)/COUNT(DISTINCT order_id)`——两者各自都说得通，但必须二选一。修复原则：**评测集服从口径注册表**（注册表是业务口径的唯一事实源）——口径是**组织约定**，模型推不出来，评测要测的是"模型是否遵守约定"，不是"模型是否猜中我"。动作：①金标与注册表对齐（退款率分母统一为支付成功单；连带率按注册口径重写并**补登记进注册表**）；②注册表补"维度化"提示（"可按渠道/时间分组，分组后排序即得…"）；③**新增口径对齐不变量测试**（`tests/test_metric_alignment.py`）：注册表算式与金标必须给出同一数字，并专门锁定退款率分母——把"口径漂移"从**静默错误**变成**红灯**。这与 `test_eval_hash`（金标哈希不变量）同一思路：**评测体系的信任根必须被测试守住**。
 - **D12：口径注册表升级为"口径 × 维度"模型（L3 表达力）**：把真实模型实测的失败**按层归类**后发现——**21 条失败里 16 条根因在 L3**：注册表只能表达"整体标量口径"，表达不了"口径 × 维度"；其中 4 条更是**反直觉约定**（"下单金额"= **实付**而非 GMV；"人均订单金额"= **订单级** AVG 而非"每用户先汇总再平均"；退款率分母 = **支付成功单**；件单价 = `AVG(order_items.price)`）——**再强的模型按字面猜都会错**。修复不是逐题调 prompt，而是升级该层表达力：①新增 `usage_hint` 列，每条口径标注**形态**（受控词表：整体类/分组类/占比类/排名类/人均类/转化类），L4 按形态选 SQL 写法（占比类=本组/全表合计×100 且分母用标量子查询、排名类=排序取 TopN、人均类=先聚合再平均）；②口径 **13 → 27 条**，把评测所考的业务能力（订单量/销量/购买用户数/件单价/老用户/各类占比/取消率/加购转化…）登记为一等公民；③反直觉约定在 definition 里显式写"**不是 …**"并进 prompt 反直觉清单（双保险）；④新增 `scripts/sync_metric_definitions.py`：口径唯一事实源是脚本里的 `METRIC_DEFINITIONS` 常量，改口径走**幂等同步**（不重跑 seeder、不碰业务数据，避免作废评测哈希）。
   **实测（真实 DeepSeek）**：multi_join **12% → 72%**（18/25）、metric_def **33% → 100%**（15/15）；mock 全量 18.3% 逐项不变。数字之外的意义：**16 条失败靠"按层归类 + 升级该层表达力"一次解决，而不是逐题打补丁**（落地文档：`DataCrew 正确性分层架构与施工计划.md`）。
+- **D13：短期对话记忆为什么放 Redis，而不是塞进 checkpointer**：checkpointer 存的是"任务跑到哪、产物是什么"，用于 interrupt/resume；它**不是对话记忆**，也不适合按 session 做 30 分钟滑动的 focus。新增 `app/infra/dialogue_memory.py`：Redis 主读（`datacrew:dialogue:{api_key_hash}:{session_id}`，JSON + version + 30min 滑动 TTL），PG `mem.dialogue_summaries` 异步摘要兜底；只存正则脱敏（手机号/身份证/邮箱；姓名等需 NER，当前未覆盖）的 `last_user_text`、`focus.filters`、`last_result.columns/candidates`，**不存 rows**；同 session 用 Redis `SET NX` 整 turn 锁，防交错写 focus。默认 `DIALOGUE_MEMORY_ENABLED=false`，先租户白名单灰度；Redis 挂/eviction → 当无记忆、不失败；pending interrupt/approval 仍只留在 PG checkpointer。
+- **D14：短期记忆的"指代"边界**：只在问题含“这个/那个/它/呢/继续”等指代时注入记忆；当前轮显式槽位优先。`这个渠道` 只有在上一轮结果候选**唯一**时才替换；多个候选追加“请确认”，没有候选明确说“没有唯一候选”。**不默认取第一名**——这是记忆最容易造成静默错误的地方。
 - **D7：子进程不继承父进程的协议管道 stdin（MCP stdio 死等事故）**：python_sandbox 在单测里全过、连上 MCP stdio server 后**每次必超时**。根因：`subprocess.run` 默认让子进程继承父进程 stdin，而 MCP server 的 stdin 正是与客户端通信的协议管道——子进程拿着这个句柄永远完不了（实测：默认继承 → communicate 死等 10s 超时；显式 `stdin=subprocess.DEVNULL` → 70ms 正常返回）。**触发条件是"运行在协议管道环境里"，所以单元测试根本抓不到**——已补 tests/test_mcp_integration.py：真实 spawn stdio server 走 JSON-RPC 调 4 个工具，专治这类"只在集成形态下现形"的 bug。通用纪律：凡是要起子进程的服务（MCP server、systemd socket 服务、uwsgi worker），一律显式给 stdin DEVNULL 或具体 fd，别继承。
 - **D3：为什么结果集哈希要双排序 + 数值格式化**：金标 SQL 与 Agent SQL 的列顺序、ORDER BY 不保证一致，1.5 与 1.50 也是同一答案。行内值排序 + 行排序 + 2 位小数，把"表示差异"从"语义差异"里剥出来，否则评测会系统性冤枉正确答案。
 - **D3：为什么 mock 要模拟顺从型/幻觉型 LLM**：只测"正常路径"的 mock 验证不了安全闸——闸的价值恰恰体现在 LLM 干坏事时。mock 按危险意图照单全写、按幻觉维度硬写不存在的列，让 CI 无 Key 也能端到端验证 10 类攻击全部被拦。
@@ -214,7 +216,7 @@ cd frontend; npm run build; npm test; cd ..
 
 | 指标 | 实测值 | 来源 / 复现方式 |
 |---|---|---|
-| 测试总量 | **162/162** 通过（55 安全闸 + 20 图表 + 10 沙箱 + 7 控制流集成 + 5 评测哈希 + 4 checkpointer + 3 观测降级 + 7 MCP stdio 集成 + 12 最终审查回归 + 7 记忆层 + 6 schema 路由 + 18 元数据拒答 + **8 口径对齐**） | `pytest tests/`（checkpointer/eval_hash/MCP 集成/记忆/路由需 PG 环境） |
+| 测试总量 | **313/313** 通过（安全闸 / 控制流 / checkpointer / 记忆 / 路由 / 评测哈希 / MCP / 沙箱 / 观测等；本次新增短期对话记忆 12 项） | `pytest tests/`（checkpointer/eval_hash/MCP 集成/记忆/路由需 PG 环境） |
 | 控制流覆盖 | 澄清中断恢复 / SQL 自愈 / 审批批准 / 审批优雅拒绝 / 无歧义直达 五条全过 | `tests/test_state_machine.py` |
 | 自愈行为 | 错误列名 sale_amount → 回灌 schema → 改用 pay_amount，1 次重试成功（3 渠道 3 行真实数据） | 集成测试 + API 冒烟 |
 | 审批兜底 | 批准大表扫描后自动 LIMIT 1000（审批语义是"允许扫表"不是"允许灌爆上下文"） | API 冒烟第 4 步 |
@@ -467,17 +469,39 @@ SQL 形状写成确定性提示注入生成 prompt（`app/agents/query_planner.p
 
 ---
 
-## 11. 记忆层实测数据（长期记忆的证据链）
+## 11. 记忆层实测数据（短期对话 + 长期偏好）
 
-Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
+Agent 记忆按四层落地（工作 / 短期任务状态 / 短期对话记忆 / 长期偏好）：
 
 | 层 | 本项目实现 | 生命周期 | 存储 |
 |---|---|---|---|
 | 工作记忆 | 节点内当场组装 prompt（schema_context / 证据块 / 错误回灌），不落盘 | 单次 LLM 调用 | — |
-| 短期记忆 | LangGraph checkpointer：任务状态（sql / insight / 澄清 / 审批 / retry） | 会话内、跨请求 | PG（thread_id = session_id） |
+| 短期任务状态 | LangGraph checkpointer：任务状态（sql / insight / 澄清 / 审批 / retry） | 会话内、跨请求 | PG（thread_id = session_id） |
+| 短期对话记忆 | `dialogue_memory`：上一轮 focus/结果候选，支持“这个渠道”指代 | 30min 滑动 | Redis 主读 + PG `mem.dialogue_summaries` 摘要兜底 |
 | 长期记忆 | `mem.preferences`：会话级口径偏好（"销售额 = 实付"） | 跨轮次 | PG `mem` schema（**不对 datacrew_ro 授权**） |
 
 为什么长期记忆只做"偏好"、且**抽取不用 LLM**：澄清中断的 payload 已经带 `term/options`，用户回答就是 `(term → choice)`——**一条 upsert 即落库**。没有"结构化写入来源"的记忆（如把对话摘要塞进向量库）在没有召回场景时只增加故障面。设计细节见 §6 ADR D9。
+
+### 11.1 短期对话记忆（Redis，默认关闭）
+
+`app/infra/dialogue_memory.py`：
+
+```text
+key   = datacrew:dialogue:{api_key_hash}:{session_id}
+value = {version, last_user_text, focus.filters,
+         last_result.columns/candidates, turns}
+TTL   = 30min 滑动
+```
+
+- 读取：`ask_service` 在跑图前读 Redis；miss 时回查 `mem.dialogue_summaries` 并回填；
+- 注入：只在问题含“这个/那个/它/呢/继续”等指代时，把上一轮 focus/候选拼进问题；
+- 写回：图结束后从 state 提取 `focus`/候选，不存 PII/rows；
+- 脱敏边界：`sanitize_text` 只覆盖手机号/身份证/邮箱正则；姓名/地址等自由文本需要 NER，当前未覆盖，灰度时不要存敏感用户原话；
+- 并发：同 session 整 turn `SET NX` 锁，拿不到锁返回可重试错误；
+- 降级：Redis 挂/eviction → 当无记忆；PG 摘要异步写，失败只记日志；
+- 开关：`DIALOGUE_MEMORY_ENABLED=false` 默认关闭，先租户白名单灰度；`pending interrupt/approval` 仍只留在 PG checkpointer。
+
+测试：`tests/test_dialogue_memory.py` 覆盖脱敏、PII 过滤、候选提取、唯一/多候选/无先行词、Redis+PG 回填、同 session 锁、关闭开关。
 
 实测（`python eval/preference_probe.py`：双轮场景 + 反向对照）：
 
@@ -485,7 +509,7 @@ Agent 记忆按三层落地（对照"工作 / 短期 / 长期"框架）：
 |---|---|---|
 | `preference_hit` | **3/3 = 100%** | 第 1 轮澄清 → 沉淀；第 2 轮同 session 再问**不再追问**且口径沿用（trace 带 `preference_applied` 标记） |
 | `fresh_session_guard` | **3/3 = 100%** | 全新 session 问同一问题**仍然澄清**——证明记忆没有污染新会话 |
-| 后端测试 | **130/130（记忆层落地时）→ 现 162/162** | 记忆层新增 7 项（词干判定 / 读写幂等 / 偏好闭环 / 新会话回归 / 显式口径优先）；此后又加口径对齐 8 项、schema 路由 6 项等 |
+| 后端测试 | **301/301 → 现 313/313** | 短期对话记忆新增 12 项（脱敏/PII 过滤/候选提取/唯一与多候选/Redis+PG 回填/锁/关闭开关/ask 注入）；旧 301 项全绿 |
 | 120 条主评测集 | **22/120 = 18.3%** | 与改动前基线**逐项一致**：记忆不改变单轮题目的行为 |
 | 跨轮持久性 | 二次运行测试仍全绿 | 靠 `tests/conftest.py` 清理测试会话的记忆——**跨轮持久状态必须由测试自己隔离**，否则"应触发澄清"的断言会在第二次运行时假失败 |
 

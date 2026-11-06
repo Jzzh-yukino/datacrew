@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     sql_row_limit: int = 1000               # SQL 结果行数硬上限
     sql_timeout_ms: int = 3000              # 语句超时
 
+    # ---- 记忆 ----
+    # 短期对话记忆：Redis 主读，PG 摘要兜底；默认关闭，灰度开启。
+    # 它只存 focus/最近结果摘要，不替代 checkpointer（PG 任务状态）。
+    dialogue_memory_enabled: bool = False
+    dialogue_memory_ttl_s: int = 1800          # Redis 滑动 TTL 30 分钟
+    dialogue_memory_max_turns: int = 5         # 只保留最近 5 轮摘要
+    dialogue_memory_pg_fallback: bool = True   # Redis miss 时回查 mem.dialogue_summaries
+    dialogue_memory_lock_ttl_s: int = 120      # 同 session 串行锁，防交错写 focus
+
     # ---- 可观测（Langfuse，留空则降级为本地日志）----
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""
