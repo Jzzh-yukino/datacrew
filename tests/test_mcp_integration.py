@@ -17,10 +17,12 @@ import os
 import subprocess
 import sys
 import time
+from datetime import date
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from asyncpg import Connection
 from langgraph.checkpoint.memory import InMemorySaver
 from openai.resources.chat.completions import AsyncCompletions
 from openai.types.chat import ChatCompletion
@@ -355,6 +357,42 @@ async def test_repeated_city_order_count_reuses_sql_and_runs_executor(monkeypatc
     ]
     assert origins == ["controlled_compiler", "controlled_cache"]
     assert second["sql_result"]["ok"]
+
+
+@needs_pg
+@pytest.mark.usefixtures("db_pools")
+async def test_previous_month_city_order_count_reuses_sql_within_data_month(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "llm_mode", "mock")
+    fetchval = Connection.fetchval
+    data_as_of = date(2025, 12, 2)
+
+    async def fetch_with_order_date(conn, query, *args, **kwargs):
+        if "max(created_at)" in query and "FROM biz.orders" in query:
+            return data_as_of
+        return await fetchval(conn, query, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "fetchval", fetch_with_order_date)
+    request = {
+        "question": "上个月北京的订单量",
+        "session_id": uuid4().hex,
+        "api_key_hash": "sql-reuse-test",
+    }
+    graph = build_graph()
+    first = await graph.ainvoke(request)
+    data_as_of = date(2025, 12, 20)
+    same_month = await graph.ainvoke(request)
+    data_as_of = date(2026, 1, 2)
+    next_month = await graph.ainvoke(request)
+
+    assert [run["sql_origin"] for run in (first, same_month, next_month)] == [
+        "controlled_compiler", "controlled_cache", "controlled_compiler",
+    ]
+    assert same_month["sql"] == first["sql"]
+    assert "o.created_at >= '2025-11-01 00:00:00+00:00'" in first["sql"]
+    assert "o.created_at < '2025-12-01 00:00:00+00:00'" in first["sql"]
+    assert "o.created_at >= '2025-12-01 00:00:00+00:00'" in next_month["sql"]
+    assert "o.created_at < '2026-01-01 00:00:00+00:00'" in next_month["sql"]
+    assert all(run["sql_result"]["ok"] for run in (first, same_month, next_month))
 
 
 @needs_pg

@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from sqlglot import exp, select
 
 _TOP_N = re.compile(r"(?:top|前)\s*(\d+)", re.IGNORECASE)
 _MONTH_PREFIX = re.compile(r"(?P<year>[0-9]{4})\s*年\s*(?P<month>[0-9]{1,2})\s*月\s*")
+PREVIOUS_MONTH_PREFIX = "上个月"
 
 
 @dataclass(frozen=True)
@@ -49,9 +50,9 @@ class CityOrderCountPlan:
 
 
 def plan_city_order_count(
-    question: str, schema_context: dict[str, Any]
+    question: str, schema_context: dict[str, Any], data_as_of: str | None = None
 ) -> CityOrderCountPlan | None:
-    """识别单城市订单量查询，明确年月按 UTC 划分自然月。"""
+    """识别单城市订单量查询，按数据截止日解析相对 UTC 自然月。"""
     question = question.strip()
     suffix = "的订单量"
     if not question.endswith(suffix):
@@ -68,6 +69,13 @@ def plan_city_order_count(
         city = city[match.end():]
         next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
         month_range = (date(year, month, 1), next_month)
+    elif city.startswith(PREVIOUS_MONTH_PREFIX):
+        if data_as_of is None:
+            return None
+        city = city.removeprefix(PREVIOUS_MONTH_PREFIX).lstrip()
+        end = date.fromisoformat(data_as_of).replace(day=1)
+        start = (end - timedelta(days=1)).replace(day=1)
+        month_range = (start, end)
     matched_fields = schema_context.get("matched_values", {}).get(city, [])
     resolved_city = {"value": city, "table": "users", "column": "city"}
     if ["users", "city"] in matched_fields or resolved_city in schema_context.get(

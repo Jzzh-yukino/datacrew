@@ -26,7 +26,12 @@ from app.agents.prompts import (
     SQL_GENERATOR_SYSTEM,
     render,
 )
-from app.agents.query_planner import build_query_plan_hint, plan_city_order_count
+from app.agents.query_planner import (
+    PREVIOUS_MONTH_PREFIX,
+    CityOrderCountPlan,
+    build_query_plan_hint,
+    plan_city_order_count,
+)
 from app.agents.state import AgentState
 from app.core.logging import get_logger
 from app.domain.sql_policy import INTENT_REFUSAL_TEXT, detect_forbidden_intent
@@ -50,10 +55,12 @@ from app.tools.sql_execute import execute_sql
 log = get_logger(__name__)
 
 MAX_RETRIES = 3
-CITY_ORDER_COUNT_COMPILER_VERSION = "city-order-count:v2:utc"
+CITY_ORDER_COUNT_COMPILER_VERSION = "city-order-count:v3:utc"
 
 
-def _city_order_count_cache_key(state: AgentState, schema_context: dict[str, Any]) -> str | None:
+def _city_order_count_cache_key(
+    state: AgentState, schema_context: dict[str, Any], plan: CityOrderCountPlan
+) -> str | None:
     session_id, scope = state.get("session_id"), state.get("api_key_hash")
     if not session_id or not scope:
         return None
@@ -72,6 +79,7 @@ def _city_order_count_cache_key(state: AgentState, schema_context: dict[str, Any
         state["question"].strip(),
         metric,
         tables,
+        [boundary.isoformat() for boundary in plan.month_range] if plan.month_range else None,
     )
     return sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
 
@@ -80,13 +88,15 @@ async def _cache_compiled_city_order_count(state: AgentState, key: str, sql: str
     try:
         tables = await load_allowed_tables(use_cache=False)
         current_context = {
+            **state["schema_context"],
             "tables": [{"name": name, "columns": columns} for name, columns in tables.items()],
             "metrics": await load_metric_definitions(use_cache=False),
         }
     except Exception:
         log.warning("sql_cache.metadata_refresh_failed")
         return
-    if _city_order_count_cache_key(state, current_context) == key:
+    plan = plan_city_order_count(state["question"], current_context, state.get("data_as_of"))
+    if plan is not None and _city_order_count_cache_key(state, current_context, plan) == key:
         sql_cache.put(key, sql)
 
 
@@ -266,8 +276,8 @@ def _today_cn() -> str:
     return now.strftime("%Y-%m-%d 星期") + "一二三四五六日"[now.weekday()]
 
 
-async def _data_as_of() -> str:
-    """数据截止日 = orders.max(created_at) 的日期。
+async def _data_as_of(*, fallback_to_today: bool = True) -> str | None:
+    """数据截止日 = orders.max(created_at) 的 UTC 日期。
 
     真实评测事故："昨天有多少订单"模型按系统今天推算，金标按数据截止日推算，
     两者差 3 天直接判错。BI 系统的正确口径就是按数据截止日解释相对时间，
@@ -275,10 +285,13 @@ async def _data_as_of() -> str:
     """
     try:
         async with admin_pool().acquire() as conn:
-            return str(await conn.fetchval("SELECT max(created_at)::date FROM biz.orders"))
-    except Exception as e:  # 降级：拿不到用系统今天，不阻塞主链路
+            latest = await conn.fetchval(
+                "SELECT (max(created_at) AT TIME ZONE 'UTC')::date FROM biz.orders"
+            )
+            return latest.isoformat() if latest is not None else None
+    except Exception as e:
         log.warning("data_as_of.fallback", extra={"context": {"reason": str(e)[:100]}})
-        return _dt.date.today().isoformat()
+        return _dt.date.today().isoformat() if fallback_to_today else None
 
 
 # 数据时间范围（min/max，按下单时间）进程内缓存：60s 足够新鲜，省掉每次生成
@@ -396,15 +409,17 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
                     "trace": [_step("schema_curator", started, clarified="rule", term=term)],
                 }
 
-    if not clarified and plan_city_order_count(question, schema_context) is not None:
-        cache_key = _city_order_count_cache_key(state, schema_context)
+    relative_month = question.strip().startswith(PREVIOUS_MONTH_PREFIX)
+    as_of = await _data_as_of(fallback_to_today=False) if relative_month else None
+    if not clarified and (plan := plan_city_order_count(question, schema_context, as_of)):
+        cache_key = _city_order_count_cache_key(state, schema_context, plan)
         cached_sql = sql_cache.get(cache_key) if cache_key is not None else None
         if cached_sql is not None:
             return {
                 "schema_context": {**schema_context, "cached_city_order_count_sql": cached_sql},
                 "ambiguity": None,
                 "clarified_answer": None,
-                "data_as_of": None,
+                "data_as_of": as_of,
                 "status": "running",
                 "trace": [_step("schema_curator", started, sql_cache_hit=True)],
             }
@@ -416,7 +431,8 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     # 当前日期注入：相对时间（昨天/最近7天）必须可推算，否则真实模型会以
     # "不知道今天几号"为由追问（真实评测 22/25 触发追问的事故之一）
     today = _today_cn()
-    as_of = await _data_as_of()
+    if not relative_month:
+        as_of = await _data_as_of()
     tool_results: list[ToolResult] = []
     analysis = await chat_json([
         {"role": "system", "content": (
@@ -425,7 +441,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
             + "\n需要确认 JOIN 条件时，可调用 describe_schema 获取表声明的外键。"
             + "\n需要确认过滤值对应的字段时，可调用 resolve_dimension_values。"
             + f"\n当前日期：{today}"
-            + f"\n数据统计截止日：{as_of}（相对时间一律按它推算，不是系统今天）"
+            + f"\n数据统计截止日：{as_of or '未知'}（相对时间一律按它推算，不是系统今天）"
         )},
         {
             "role": "user",
@@ -533,14 +549,14 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     started = time.perf_counter()
     schema_context = state.get("schema_context") or {}
     if not state.get("last_error") and not state.get("clarified_answer"):
-        plan = plan_city_order_count(state["question"], schema_context)
+        plan = plan_city_order_count(state["question"], schema_context, state.get("data_as_of"))
         if plan is not None:
             cached_sql = schema_context.get("cached_city_order_count_sql")
             origin = "controlled_cache" if cached_sql is not None else "controlled_compiler"
             return {
                 "sql": cached_sql if cached_sql is not None else plan.compile_sql(),
                 "sql_origin": origin,
-                "sql_cache_key": _city_order_count_cache_key(state, schema_context),
+                "sql_cache_key": _city_order_count_cache_key(state, schema_context, plan),
                 "sql_reasoning": (
                     "按指定城市和 UTC 月份统计所有状态的订单数。"
                     if plan.month_range is not None
