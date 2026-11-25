@@ -10,20 +10,39 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Protocol
 
 from app.agents.llm_mock import mock_chat
 from app.core.config import get_settings
 from app.core.logging import get_logger
 
+if TYPE_CHECKING:
+    from openai.types.chat import ChatCompletionToolParam
+
+    from app.infra.llm import LLMResponse
+
 log = get_logger(__name__)
 
 _FENCE = chr(96) * 3  # 三个反引号：LLM 常把 JSON 包在代码块里
+MAX_SCHEMA_RETRIEVAL_ROUNDS = 2
+SCHEMA_RETRIEVAL_TOOLS = ("search_metrics", "describe_schema", "resolve_dimension_values")
+
+
+class ToolResult(NamedTuple):
+    name: str
+    arguments: dict[str, Any]
+    content: str
 
 
 class ChatFn(Protocol):
     async def __call__(
-        self, messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = False,
+        tier: Literal["main", "small"] = "main",
+        with_schema_retrieval: bool = False,
+        tool_results: list[ToolResult] | None = None,
     ) -> str: ...
 
 
@@ -42,12 +61,19 @@ def _parse_json(text: str) -> dict[str, Any]:
         raise
 
 
-async def _real_chat(
-    messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
-) -> str:
+async def _recorded_completion(
+    messages: list[dict[str, Any]],
+    *,
+    json_mode: bool,
+    tier: Literal["main", "small"],
+    tools: list[ChatCompletionToolParam] | None = None,
+    tool_choice: Literal["none"] | None = None,
+) -> LLMResponse:
     from app.infra.llm import get_llm
 
-    resp = await get_llm().chat(messages, json_mode=json_mode, tier=tier)  # type: ignore[arg-type]
+    resp = await get_llm().chat(
+        messages, json_mode=json_mode, tier=tier, tools=tools, tool_choice=tool_choice
+    )
     # 观测旁路：记 Langfuse trace（未配置 key 时自动降级，不影响主链路）
     from app.infra.observability import record_generation
 
@@ -61,11 +87,64 @@ async def _real_chat(
         cost_yuan=resp.cost_yuan,
         tier=tier,
     )
-    return resp.content
+    return resp
+
+
+async def _real_chat(
+    messages: list[dict[str, str]],
+    *,
+    json_mode: bool = False,
+    tier: Literal["main", "small"] = "main",
+    with_schema_retrieval: bool = False,
+    tool_results: list[ToolResult] | None = None,
+) -> str:
+    if not with_schema_retrieval:
+        return (await _recorded_completion(messages, json_mode=json_mode, tier=tier)).content
+
+    from app.tools.mcp_server import mcp
+
+    tools: list[ChatCompletionToolParam] = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description or "",
+                "parameters": tool.inputSchema,
+            },
+        }
+        for tool in await mcp.list_tools()
+        if tool.name in SCHEMA_RETRIEVAL_TOOLS
+    ]
+    history = messages
+    for _ in range(MAX_SCHEMA_RETRIEVAL_ROUNDS):
+        response = await _recorded_completion(history, json_mode=json_mode, tier=tier, tools=tools)
+        if not response.message.tool_calls:
+            return response.content
+
+        history = [*history, response.message.model_dump(exclude_none=True)]
+        for call in response.message.tool_calls:
+            if call.type != "function" or call.function.name not in SCHEMA_RETRIEVAL_TOOLS:
+                raise ValueError("SchemaCurator 只能调用已开放的检索工具")
+            name = call.function.name
+            arguments = json.loads(call.function.arguments)
+            content = (await mcp.call_tool(name, arguments))[0].text
+            if tool_results is not None:
+                tool_results.append(ToolResult(name, arguments, content))
+            history.append({"role": "tool", "tool_call_id": call.id, "content": content})
+
+    response = await _recorded_completion(
+        history, json_mode=json_mode, tier=tier, tools=tools, tool_choice="none"
+    )
+    return response.content
 
 
 async def _mock_chat_async(
-    messages: list[dict[str, str]], *, json_mode: bool = False, tier: str = "main"
+    messages: list[dict[str, str]],
+    *,
+    json_mode: bool = False,
+    tier: Literal["main", "small"] = "main",
+    with_schema_retrieval: bool = False,
+    tool_results: list[ToolResult] | None = None,
 ) -> str:
     # tier 对 mock 无意义（本地规则不花钱），签名保持一致让节点代码两种模式零差异
     return mock_chat(messages, json_mode=json_mode, tier=tier)
@@ -80,7 +159,11 @@ def get_chat_fn() -> ChatFn:
 
 
 async def chat_json(
-    messages: list[dict[str, str]], *, tier: str = "main"
+    messages: list[dict[str, str]],
+    *,
+    tier: Literal["main", "small"] = "main",
+    with_schema_retrieval: bool = False,
+    tool_results: list[ToolResult] | None = None,
 ) -> dict[str, Any]:
     """调用 LLM 并把输出解析成 dict（所有节点统一走这里）。
 
@@ -88,5 +171,11 @@ async def chat_json(
     轻任务（歧义检测、意图分类）走 small，重任务（SQL 生成、结论解读）走 main。
     """
     chat_fn = get_chat_fn()
-    text = await chat_fn(messages, json_mode=True, tier=tier)
+    text = await chat_fn(
+        messages,
+        json_mode=True,
+        tier=tier,
+        with_schema_retrieval=with_schema_retrieval,
+        tool_results=tool_results,
+    )
     return _parse_json(text)

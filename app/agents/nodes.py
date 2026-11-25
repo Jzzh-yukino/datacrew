@@ -13,11 +13,12 @@ from __future__ import annotations
 import datetime as _dt
 import json
 import time
+from hashlib import sha256
 from typing import Any
 
 from langgraph.types import interrupt
 
-from app.agents.chat import chat_json, get_chat_fn
+from app.agents.chat import ToolResult, chat_json, get_chat_fn
 from app.agents.prompts import (
     INSIGHT_WRITER_SYSTEM,
     SCHEMA_CURATOR_SYSTEM,
@@ -25,7 +26,7 @@ from app.agents.prompts import (
     SQL_GENERATOR_SYSTEM,
     render,
 )
-from app.agents.query_planner import build_query_plan_hint
+from app.agents.query_planner import build_query_plan_hint, plan_city_order_count
 from app.agents.state import AgentState
 from app.core.logging import get_logger
 from app.domain.sql_policy import INTENT_REFUSAL_TEXT, detect_forbidden_intent
@@ -36,14 +37,58 @@ from app.infra.memory import (
     mark_preference_used,
     remember_preference,
 )
+from app.infra.sql_cache import sql_cache
 from app.tools.chart_gen import generate_chart
-from app.tools.schema_registry import match_clarification_rule
+from app.tools.schema_registry import (
+    load_allowed_tables,
+    load_metric_definitions,
+    match_clarification_rule,
+)
 from app.tools.schema_search import search_schema
 from app.tools.sql_execute import execute_sql
 
 log = get_logger(__name__)
 
 MAX_RETRIES = 3
+CITY_ORDER_COUNT_COMPILER_VERSION = "city-order-count:v2:utc"
+
+
+def _city_order_count_cache_key(state: AgentState, schema_context: dict[str, Any]) -> str | None:
+    session_id, scope = state.get("session_id"), state.get("api_key_hash")
+    if not session_id or not scope:
+        return None
+    metric = next((m for m in schema_context["metrics"] if m["metric_name"] == "订单量"), None)
+    if metric is None:
+        return None
+    tables = {
+        table["name"]: sorted(table["columns"])
+        for table in schema_context["tables"]
+        if table["name"] in {"orders", "users"}
+    }
+    parts = (
+        CITY_ORDER_COUNT_COMPILER_VERSION,
+        scope,
+        session_id,
+        state["question"].strip(),
+        metric,
+        tables,
+    )
+    return sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+async def _cache_compiled_city_order_count(state: AgentState, key: str, sql: str) -> None:
+    try:
+        tables = await load_allowed_tables(use_cache=False)
+        current_context = {
+            "tables": [{"name": name, "columns": columns} for name, columns in tables.items()],
+            "metrics": await load_metric_definitions(use_cache=False),
+        }
+    except Exception:
+        log.warning("sql_cache.metadata_refresh_failed")
+        return
+    if _city_order_count_cache_key(state, current_context) == key:
+        sql_cache.put(key, sql)
+
 
 # ---- 元数据类问题（表结构 / 列数 / 索引）：正确答案要查 information_schema，而它被
 # 闸 4（表白名单）禁止——业务表白名单之外一律不放行。所以正确结局是**拒答**，
@@ -206,6 +251,12 @@ def _fmt_schema_context(schema_context: dict[str, Any]) -> str:
                 f"  {m['metric_name']}【{m.get('usage_hint') or '整体类'}】: {m['definition']}"
                 f"\n    SQL提示: {m['sql_hint']}"
             )
+    dimensions = schema_context.get("resolved_dimensions", [])
+    if dimensions:
+        lines.append("\n已检索的维度值与候选过滤字段：")
+        lines.extend(
+            f"  {match['value']} → biz.{match['table']}.{match['column']}" for match in dimensions
+        )
     return "\n".join(lines)
 
 
@@ -345,6 +396,19 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
                     "trace": [_step("schema_curator", started, clarified="rule", term=term)],
                 }
 
+    if not clarified and plan_city_order_count(question, schema_context) is not None:
+        cache_key = _city_order_count_cache_key(state, schema_context)
+        cached_sql = sql_cache.get(cache_key) if cache_key is not None else None
+        if cached_sql is not None:
+            return {
+                "schema_context": {**schema_context, "cached_city_order_count_sql": cached_sql},
+                "ambiguity": None,
+                "clarified_answer": None,
+                "data_as_of": None,
+                "status": "running",
+                "trace": [_step("schema_curator", started, sql_cache_hit=True)],
+            }
+
     # 2. LLM 分析歧义（已有澄清回答时把回答并入问题，消除歧义）
     analysis_question = question
     if clarified:
@@ -353,9 +417,13 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     # "不知道今天几号"为由追问（真实评测 22/25 触发追问的事故之一）
     today = _today_cn()
     as_of = await _data_as_of()
+    tool_results: list[ToolResult] = []
     analysis = await chat_json([
         {"role": "system", "content": (
             SCHEMA_CURATOR_SYSTEM
+            + "\n分析业务指标时，可调用 search_metrics 核对核心术语的候选口径。"
+            + "\n需要确认 JOIN 条件时，可调用 describe_schema 获取表声明的外键。"
+            + "\n需要确认过滤值对应的字段时，可调用 resolve_dimension_values。"
             + f"\n当前日期：{today}"
             + f"\n数据统计截止日：{as_of}（相对时间一律按它推算，不是系统今天）"
         )},
@@ -366,7 +434,13 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
                 f"{schema_context.get('tables') and _fmt_schema_context(schema_context)}"
             ),
         },
-    ], tier="small")  # 歧义检测是轻任务（结构化小输出），走轻量模型——分级路由的真实调用点
+    ], tier="small", with_schema_retrieval=True, tool_results=tool_results)
+    schema_context["resolved_dimensions"] = [
+        {"value": result.arguments["value"].strip(), **match}
+        for result in tool_results
+        if result.name == "resolve_dimension_values"
+        for match in json.loads(result.content)["matches"]
+    ]
 
     # 3. 可回答性闸门（DC-2）：先于歧义——数据里根本没有的字段，追问口径也答不了。
     #    走与元数据拒答相同的终态（status=done + insight.summary），条件边直达 END，
@@ -457,7 +531,27 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
 async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     """生成 SQL；有 last_error 时进入自愈模式（错误回灌）。"""
     started = time.perf_counter()
-    schema_ctx = _fmt_schema_context(state.get("schema_context", {}))
+    schema_context = state.get("schema_context") or {}
+    if not state.get("last_error") and not state.get("clarified_answer"):
+        plan = plan_city_order_count(state["question"], schema_context)
+        if plan is not None:
+            cached_sql = schema_context.get("cached_city_order_count_sql")
+            origin = "controlled_cache" if cached_sql is not None else "controlled_compiler"
+            return {
+                "sql": cached_sql if cached_sql is not None else plan.compile_sql(),
+                "sql_origin": origin,
+                "sql_cache_key": _city_order_count_cache_key(state, schema_context),
+                "sql_reasoning": (
+                    "按指定城市和 UTC 月份统计所有状态的订单数。"
+                    if plan.month_range is not None
+                    else "按城市过滤并统计所有状态的订单数。"
+                ),
+                "retry_count": 0,
+                "last_error": None,
+                "trace": [_step("sql_generator", started, retry=0, sql_origin=origin)],
+            }
+
+    schema_ctx = _fmt_schema_context(schema_context)
 
     system_prompt = render(SQL_GENERATOR_SYSTEM, schema_context=schema_ctx)
     as_of = state.get("data_as_of") or ""
@@ -515,6 +609,8 @@ async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     retry = state.get("retry_count", 0) + 1 if state.get("last_error") else 0
     return {
         "sql": result.get("sql", ""),
+        "sql_origin": "free_sql",
+        "sql_cache_key": None,
         "sql_reasoning": result.get("reasoning", ""),
         "retry_count": retry,
         "last_error": None,  # 清空错误，避免下一轮误入自愈模式
@@ -527,6 +623,7 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
     """调 MCP sql_execute；高危 SQL interrupt 转人工审批。"""
     started = time.perf_counter()
     sql = state.get("sql") or ""
+    cache_key, origin = state.get("sql_cache_key"), state.get("sql_origin")
     result = await execute_sql(sql)
 
     if result.get("error_type") == "approval_required":
@@ -546,6 +643,8 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
             }
 
     if not result.get("ok"):
+        if cache_key is not None and origin == "controlled_cache":
+            sql_cache.discard(cache_key)
         retry_count = state.get("retry_count", 0)
         if retry_count >= MAX_RETRIES:
             return {
@@ -564,6 +663,9 @@ async def executor_node(state: AgentState) -> dict[str, Any]:
                 error_msg=str(result.get("error", ""))[:200],
             )],
         }
+
+    if cache_key is not None and origin == "controlled_compiler":
+        await _cache_compiled_city_order_count(state, cache_key, sql)
 
     return {
         "sql_result": result,

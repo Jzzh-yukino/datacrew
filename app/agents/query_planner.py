@@ -11,8 +11,70 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
+from datetime import date
+from typing import Any
+
+from sqlglot import exp, select
 
 _TOP_N = re.compile(r"(?:top|前)\s*(\d+)", re.IGNORECASE)
+_MONTH_PREFIX = re.compile(r"(?P<year>[0-9]{4})\s*年\s*(?P<month>[0-9]{1,2})\s*月\s*")
+
+
+@dataclass(frozen=True)
+class CityOrderCountPlan:
+    city: str
+    month_range: tuple[date, date] | None = None
+
+    def compile_sql(self) -> str:
+        city_filter = exp.EQ(
+            this=exp.column("city", table="u"), expression=exp.Literal.string(self.city)
+        )
+        filters: list[exp.Expression] = [city_filter]
+        if self.month_range is not None:
+            start, end = (
+                exp.Literal.string(f"{boundary} 00:00:00+00:00") for boundary in self.month_range
+            )
+            filters.extend([
+                exp.GTE(this=exp.column("created_at", table="o"), expression=start),
+                exp.LT(this=exp.column("created_at", table="o"), expression=end),
+            ])
+        return (
+            select("COUNT(*) AS order_count")
+            .from_("biz.orders AS o")
+            .join("biz.users AS u", on="u.id = o.user_id")
+            .where(exp.and_(*filters, wrap=False))
+            .sql(dialect="postgres")
+        )
+
+
+def plan_city_order_count(
+    question: str, schema_context: dict[str, Any]
+) -> CityOrderCountPlan | None:
+    """识别单城市订单量查询，明确年月按 UTC 划分自然月。"""
+    question = question.strip()
+    suffix = "的订单量"
+    if not question.endswith(suffix):
+        return None
+    if not any(metric["metric_name"] == "订单量" for metric in schema_context.get("metrics", [])):
+        return None
+
+    city = question.removesuffix(suffix)
+    month_range = None
+    if match := _MONTH_PREFIX.match(city):
+        year, month = int(match["year"]), int(match["month"])
+        if year == 0 or not 1 <= month <= 12 or (year, month) == (9999, 12):
+            return None
+        city = city[match.end():]
+        next_month = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+        month_range = (date(year, month, 1), next_month)
+    matched_fields = schema_context.get("matched_values", {}).get(city, [])
+    resolved_city = {"value": city, "table": "users", "column": "city"}
+    if ["users", "city"] in matched_fields or resolved_city in schema_context.get(
+        "resolved_dimensions", []
+    ):
+        return CityOrderCountPlan(city, month_range)
+    return None
 
 
 def build_query_plan_hint(question: str) -> str | None:

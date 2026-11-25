@@ -15,7 +15,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI
+from openai.types.chat import ChatCompletionMessage, ChatCompletionToolParam
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from app.core.config import Settings, get_settings
@@ -39,6 +40,7 @@ class LLMResponse:
     completion_tokens: int
     latency_ms: int
     cost_yuan: float
+    message: ChatCompletionMessage
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -71,11 +73,13 @@ class LLMClient:
     )
     async def _call_openai(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         model: str,
         temperature: float,
         max_tokens: int | None,
         response_format: dict[str, str] | None,
+        tools: list[ChatCompletionToolParam] | None,
+        tool_choice: Literal["none"] | None,
     ) -> Any:
         return await self._client.chat.completions.create(
             model=model,
@@ -83,16 +87,20 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
             response_format=response_format,  # type: ignore[arg-type]
+            tools=tools if tools is not None else NOT_GIVEN,
+            tool_choice=tool_choice if tool_choice is not None else NOT_GIVEN,
         )
 
     async def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         tier: Literal["main", "small"] = "main",
         temperature: float | None = None,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        tools: list[ChatCompletionToolParam] | None = None,
+        tool_choice: Literal["none"] | None = None,
     ) -> LLMResponse:
         """统一对话入口。tier=small 走轻量模型（分级路由）。"""
         model = self._s.llm_model if tier == "main" else self._s.llm_small_model
@@ -101,7 +109,9 @@ class LLMClient:
 
         started = time.perf_counter()
         async with self._sem:  # 并发闸：在途请求 ≤ LLM_MAX_CONCURRENCY
-            resp = await self._call_openai(messages, model, temp, max_tokens, fmt)
+            resp = await self._call_openai(
+                messages, model, temp, max_tokens, fmt, tools, tool_choice
+            )
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = resp.usage
@@ -119,7 +129,7 @@ class LLMClient:
         self.total_completion_tokens += completion_tokens
         self.total_cost_yuan += cost
 
-        content = resp.choices[0].message.content or ""
+        message = resp.choices[0].message
         log.info(
             "llm.chat",
             extra={
@@ -134,12 +144,13 @@ class LLMClient:
             },
         )
         return LLMResponse(
-            content=content,
+            content=message.content or "",
             model=model,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             cost_yuan=cost,
+            message=message,
         )
 
     def usage_snapshot(self) -> dict[str, Any]:

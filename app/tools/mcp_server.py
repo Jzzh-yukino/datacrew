@@ -21,10 +21,18 @@ from contextlib import asynccontextmanager
 from mcp.server.fastmcp import FastMCP
 
 from app.core.logging import get_logger, setup_logging
+from app.domain.sql_policy import pii_columns
 from app.infra.db import close_pools, init_pools
 from app.tools.chart_gen import generate_chart
 from app.tools.python_sandbox import run_python
-from app.tools.schema_search import search_schema
+from app.tools.schema_registry import (
+    derive_clarification_rules,
+    load_foreign_keys,
+    load_metric_definitions,
+    load_table_columns,
+    normalize_metric_term,
+)
+from app.tools.schema_search import load_dimension_index, search_schema
 from app.tools.sql_execute import execute_sql
 
 log = get_logger(__name__)
@@ -80,6 +88,40 @@ async def schema_search(question: str, top_k: int = 5) -> dict:
         {"tables": [{"name", "columns", "score"}], "metrics": [{...}]}
     """
     return await search_schema(question, top_k)
+
+
+@mcp.tool()
+async def describe_schema(table: str) -> dict:
+    """获取 biz 表的列名、数据类型和外键。table 是不带 schema 前缀的表名。"""
+    return {
+        "columns": await load_table_columns(table),
+        "foreign_keys": await load_foreign_keys(table),
+    }
+
+
+@mcp.tool()
+async def resolve_dimension_values(value: str) -> dict:
+    """按完整业务取值查找可用于过滤的维度列，如北京对应 users.city。"""
+    index = await load_dimension_index()
+    return {
+        "matches": [
+            {"table": table, "column": column}
+            for table, column in index.get(value.strip(), [])
+            if column not in pii_columns(table)
+        ]
+    }
+
+
+@mcp.tool()
+async def search_metrics(term: str) -> dict:
+    """按已注册指标名、业务术语或别名检索口径。歧义术语返回所有候选口径。"""
+    metrics = await load_metric_definitions()
+    term = normalize_metric_term(term)
+    candidates = next(
+        (rule["options"] for rule in derive_clarification_rules(metrics) if rule["term"] == term),
+        (term,),
+    )
+    return {"metrics": [metric for metric in metrics if metric["metric_name"] in candidates]}
 
 
 @mcp.tool()

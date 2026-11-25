@@ -12,9 +12,10 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -32,11 +33,18 @@ from app.infra.dialogue_memory import (
     flush_dialogue_memory,
 )
 from app.infra.memory import ensure_memory_schema
+from app.infra.sql_cache import sql_cache
 from app.infra.storage import get_storage
 
 log = get_logger(__name__)
 
 MAX_QUESTION_LEN = 500
+
+
+async def _prune_sql_cache_periodically() -> None:
+    while True:
+        await asyncio.sleep(60)
+        sql_cache.prune_expired()
 
 
 @asynccontextmanager
@@ -47,7 +55,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await ensure_memory_schema()
     await ensure_dialogue_memory_schema()
     log.info("api.started")
-    yield
+    cache_cleanup = asyncio.create_task(_prune_sql_cache_periodically())
+    try:
+        yield
+    finally:
+        cache_cleanup.cancel()
+        with suppress(asyncio.CancelledError):
+            await cache_cleanup
     await flush_dialogue_memory()
     await close_pools()
     from app.agents.supervisor import close_checkpointer

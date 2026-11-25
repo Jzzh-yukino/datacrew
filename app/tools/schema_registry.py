@@ -14,7 +14,7 @@ import time
 
 from app.core.logging import get_logger
 from app.infra.cache import cache_get, cache_set, get_redis
-from app.infra.db import admin_pool
+from app.infra.db import admin_pool, ro_pool
 
 log = get_logger(__name__)
 
@@ -79,6 +79,47 @@ async def invalidate_cache() -> None:
     Redis 两级 key 也删（其他 worker 的 L1 最多 30s 后自然过期）。"""
     _l1_invalidate()
     await get_redis().delete(CACHE_KEY, METRICS_CACHE_KEY)
+
+
+async def load_table_columns(table: str) -> list[dict[str, str]]:
+    """读取当前只读角色可见的 biz 表列名及数据类型。"""
+    rows = await ro_pool().fetch(
+        """
+        SELECT column_name AS name, data_type
+        FROM information_schema.columns
+        WHERE table_schema = 'biz' AND table_name = $1
+        ORDER BY ordinal_position
+        """,
+        table,
+    )
+    return [dict(row) for row in rows]
+
+
+async def load_foreign_keys(table: str) -> list[dict]:
+    """读取 biz 表声明的外键，保留复合外键的列配对顺序。"""
+    rows = await ro_pool().fetch(
+        """
+        SELECT array_agg(src_column.attname ORDER BY pair.position) AS columns,
+               dst.relname AS referenced_table,
+               array_agg(dst_column.attname ORDER BY pair.position) AS referenced_columns
+        FROM pg_catalog.pg_constraint AS fk
+        JOIN pg_catalog.pg_class AS src ON src.oid = fk.conrelid
+        JOIN pg_catalog.pg_namespace AS ns ON ns.oid = src.relnamespace
+        JOIN pg_catalog.pg_class AS dst
+            ON dst.oid = fk.confrelid AND dst.relnamespace = src.relnamespace
+        CROSS JOIN LATERAL unnest(fk.conkey, fk.confkey) WITH ORDINALITY
+            AS pair(src_attnum, dst_attnum, position)
+        JOIN pg_catalog.pg_attribute AS src_column
+            ON src_column.attrelid = src.oid AND src_column.attnum = pair.src_attnum
+        JOIN pg_catalog.pg_attribute AS dst_column
+            ON dst_column.attrelid = dst.oid AND dst_column.attnum = pair.dst_attnum
+        WHERE fk.contype = 'f' AND ns.nspname = 'biz' AND src.relname = $1
+        GROUP BY fk.oid, fk.conname, dst.relname
+        ORDER BY fk.conname, fk.oid
+        """,
+        table,
+    )
+    return [dict(row) for row in rows]
 
 
 METRICS_CACHE_KEY = "schema:metric_definitions"
@@ -199,6 +240,14 @@ _TERM_SYNONYMS: dict[str, tuple[str, ...]] = {
     "销售额": ("卖了多少钱", "卖了多少"),
     "转化率": ("转化比例", "转化水平"),
 }
+
+
+def normalize_metric_term(term: str) -> str:
+    """将业务别名转换为注册表术语。"""
+    term = term.strip()
+    return next(
+        (canonical for canonical, aliases in _TERM_SYNONYMS.items() if term in aliases), term
+    )
 
 
 def _term_hit(term: str, question: str) -> bool:

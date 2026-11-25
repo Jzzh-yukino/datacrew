@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, Any, Literal, TypedDict
 
 
 class Ambiguity(TypedDict, total=False):
@@ -39,6 +39,7 @@ class AgentState(TypedDict, total=False):
     # ---- 输入 ----
     question: str
     session_id: str
+    api_key_hash: str
     clarified_answer: str | None   # 用户对澄清问题的回答（resume 时注入）
     dialogue_context: dict[str, Any] | None  # 应用层注入的短期记忆，只读
 
@@ -49,6 +50,8 @@ class AgentState(TypedDict, total=False):
 
     # ---- SQLGenerator 产物 ----
     sql: str | None
+    sql_origin: Literal["controlled_compiler", "controlled_cache", "free_sql"] | None
+    sql_cache_key: str | None
     sql_reasoning: str | None
 
     # ---- Executor 产物 ----

@@ -147,6 +147,8 @@ _FRESH_TURN_FIELDS: dict[str, Any] = {
     "ambiguity": None,
     "data_as_of": None,
     "sql": None,
+    "sql_origin": None,
+    "sql_cache_key": None,
     "sql_reasoning": None,
     "sql_result": None,
     "last_error": None,
@@ -195,6 +197,7 @@ async def ask(
                 {
                     "question": graph_question,
                     "session_id": session_id,
+                    "api_key_hash": api_key_hash,
                     "dialogue_context": context,
                     "status": "running",
                 },
