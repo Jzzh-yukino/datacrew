@@ -3,7 +3,7 @@
 // 界面可直接改（localStorage 持久化），不需要重新构建。
 // 图表经 fetch 拿 blob，因为 <img src> 带不了自定义头。
 import { createSseParser, type SseFrame } from './sse'
-import type { AskEvent } from '@/types/events'
+import type { AskEvent, MetricDecision } from '@/types/events'
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) {
@@ -88,10 +88,10 @@ export function askStream(
   return postSse('/ask', { question, session_id: sessionId }, apiKey, signal)
 }
 
-/** 恢复执行：澄清传字符串；审批传 {approved: boolean}。 */
+/** 恢复澄清、查询审批或口径确认。 */
 export function resumeStream(
   sessionId: string,
-  value: string | { approved: boolean },
+  value: string | { approved: boolean } | MetricDecision,
   apiKey: string,
   signal?: AbortSignal,
 ): AsyncGenerator<AskEvent> {

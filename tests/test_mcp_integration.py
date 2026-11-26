@@ -24,12 +24,14 @@ from uuid import uuid4
 import pytest
 from asyncpg import Connection
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from openai.resources.chat.completions import AsyncCompletions
 from openai.types.chat import ChatCompletion
 
 from app.agents.chat import chat_json
 from app.agents.supervisor import build_graph
 from app.core.config import get_settings
+from app.tools import schema_registry
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -132,6 +134,7 @@ def test_tools_discovered(mcp: McpStdio) -> None:
     assert names == [
         "chart_gen",
         "describe_schema",
+        "get_metric_specs",
         "python_sandbox",
         "resolve_dimension_values",
         "schema_search",
@@ -274,9 +277,10 @@ async def test_model_receives_schema_evidence_from_mcp(
     ("question", "expected_sql", "controlled"),
     [
         (
-            "北京各渠道的订单量",
-            "SELECT o.channel, COUNT(*) FROM biz.orders AS o JOIN biz.users AS u "
-            "ON u.id = o.user_id WHERE u.city = '北京' GROUP BY o.channel",
+            "北京各渠道的订单量从多到少排行",
+            "SELECT o.channel, COUNT(*) AS order_count FROM biz.orders AS o JOIN biz.users AS u "
+            "ON u.id = o.user_id WHERE u.city = '北京' GROUP BY o.channel "
+            "ORDER BY order_count DESC",
             False,
         ),
         (
@@ -293,8 +297,17 @@ async def test_model_receives_schema_evidence_from_mcp(
             "AND o.created_at < '2025-12-01 00:00:00+00:00'",
             True,
         ),
+        (
+            "北京各渠道的订单量",
+            "SELECT o.channel, COUNT(*) AS order_count FROM biz.orders AS o JOIN biz.users AS u "
+            "ON u.id = o.user_id WHERE u.city = '北京' GROUP BY o.channel ORDER BY o.channel",
+            True,
+        ),
     ],
-    ids=["free-sql-evidence", "controlled-order-count", "controlled-month-order-count"],
+    ids=[
+        "free-sql-evidence", "controlled-order-count", "controlled-month-order-count",
+        "controlled-channel-order-count",
+    ],
 )
 async def test_sql_generation_uses_city_evidence(
     monkeypatch, question: str, expected_sql: str, controlled: bool
@@ -317,6 +330,8 @@ async def test_sql_generation_uses_city_evidence(
         else:
             assert not controlled, "单城市的已注册订单量应由编译器生成 SQL"
             assert "北京 → biz.users.city" in messages[0]["content"]
+            assert "订单渠道使用 biz.orders.channel" in messages[0]["content"]
+            assert "用户注册来源使用 biz.users.channel_source" in messages[0]["content"]
             message = {"role": "assistant", "content": json.dumps({"sql": expected_sql})}
         return ChatCompletion.model_validate({
             "id": "dimension-evidence",
@@ -334,12 +349,124 @@ async def test_sql_generation_uses_city_evidence(
         interrupt_before=["executor"],
     )
     assert result["sql"] == expected_sql
+    assert result["sql_origin"] == ("controlled_compiler" if controlled else "free_sql")
 
 
 @needs_pg
 @pytest.mark.usefixtures("db_pools")
-async def test_repeated_city_order_count_reuses_sql_and_runs_executor(monkeypatch) -> None:
+async def test_new_metric_requires_confirmation_and_is_reused_in_its_session(monkeypatch) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "llm_mode", "real")
+    monkeypatch.setattr(settings, "langfuse_public_key", "")
+    definition = {
+        "name": "优质订单量",
+        "population": "订单",
+        "formula": "统计符合筛选条件的订单行数",
+        "filters": ["实付金额大于 100 元"],
+        "time_basis": "下单时间",
+        "unit": "单",
+    }
+
+    sql = "SELECT COUNT(*) AS order_count FROM biz.orders WHERE pay_amount > 100"
+    confirmed = False
+
+    async def create_completion(_client, *, messages, model, tools=(), **_kwargs):
+        context = "\n".join(message["content"] for message in messages)
+        already_known = "已确认会话口径" in context and definition["formula"] in context
+        if isinstance(tools, list) and tools:
+            if "新增指标" in messages[-1]["content"]:
+                body = {"answerable": True, "ambiguity": None, "metric_draft": definition}
+            else:
+                body = {"answerable": already_known, "ambiguity": None}
+        elif "PostgreSQL 专家" in messages[0]["content"]:
+            assert confirmed and already_known, "生成 SQL 时必须使用已确认的草案"
+            body = {"sql": sql}
+        else:
+            body = {"summary": "统计完成"}
+        return ChatCompletion.model_validate({
+            "id": "metric-draft",
+            "model": model,
+            "created": 0,
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": json.dumps(body)},
+                "finish_reason": "stop",
+            }],
+        })
+
+    monkeypatch.setattr(AsyncCompletions, "create", create_completion)
+    graph = build_graph(checkpointer=InMemorySaver())
+    session = uuid4().hex
+    request = {"session_id": session, "api_key_hash": "metric-draft-test"}
+    config = {"configurable": {"thread_id": session}}
+    await graph.ainvoke({
+        "question": "新增指标优质订单量，定义为实付金额大于 100 元的订单数，按下单时间统计",
+        **request,
+    }, config=config)
+    state = await graph.aget_state(config)
+    (pending,) = (item.value for task in state.tasks for item in task.interrupts)
+    assert pending["type"] == "metric_confirmation"
+    assert pending["draft"]["definition"] == definition
+    assert pending["draft"]["version"] == 1
+    assert pending["draft"]["draft_id"]
+    assert len(pending["draft"]["definition_digest"]) == 64
+    assert pending["draft"] == state.values["metric_draft"]
+    assert state.values.get("sql") is None
+    assert state.values.get("sql_result") is None
+
+    confirmed = True
+    draft = pending["draft"]
+    decision = {key: draft[key] for key in ("draft_id", "version", "definition_digest")}
+    result = await graph.ainvoke(Command(resume={**decision, "approved": True}), config=config)
+    assert result["sql_result"]["ok"]
+    assert result["sql_origin"] == "free_sql"
+
+    followup = {**request, "question": "优质订单量是多少？"}
+    fresh_graph = build_graph()
+    reused = await fresh_graph.ainvoke(followup)
+    assert reused["sql_result"]["ok"]
+    for other_scope in ({"session_id": uuid4().hex}, {"api_key_hash": "another-key"}):
+        isolated = await fresh_graph.ainvoke({**followup, **other_scope})
+        assert isolated["refusal"]
+        assert isolated.get("sql") is None
+
+
+@needs_pg
+@pytest.mark.usefixtures("db_pools")
+@pytest.mark.parametrize(
+    ("question", "followup"),
+    [
+        ("北京的订单量", "北京的订单量"),
+        ("北京各渠道的订单量", "北京各渠道的订单量分别是多少？"),
+    ],
+    ids=["same-question", "same-plan-different-wording"],
+)
+async def test_repeated_city_order_count_reuses_sql_and_runs_executor(
+    monkeypatch, question: str, followup: str
+) -> None:
     monkeypatch.setattr(get_settings(), "llm_mode", "mock")
+    request = {
+        "question": question,
+        "session_id": uuid4().hex,
+        "api_key_hash": "sql-reuse-test",
+    }
+    graph = build_graph()
+    first = await graph.ainvoke(request)
+    second = await graph.ainvoke({**request, "question": followup})
+
+    assert [first["sql_origin"], second["sql_origin"]] == [
+        "controlled_compiler", "controlled_cache",
+    ]
+    assert second["sql"] == first["sql"]
+    assert second["sql_result"]["ok"]
+
+
+@needs_pg
+@pytest.mark.usefixtures("db_pools")
+async def test_city_order_count_recompiles_when_metric_version_changes(monkeypatch) -> None:
+    monkeypatch.setattr(get_settings(), "llm_mode", "mock")
+    monkeypatch.setattr(schema_registry, "ORDER_COUNT_METRIC_VERSION", 1)
     request = {
         "question": "北京的订单量",
         "session_id": uuid4().hex,
@@ -347,16 +474,16 @@ async def test_repeated_city_order_count_reuses_sql_and_runs_executor(monkeypatc
     }
     graph = build_graph()
     first = await graph.ainvoke(request)
-    second = await graph.ainvoke(request)
+    cached = await graph.ainvoke(request)
+    monkeypatch.setattr(schema_registry, "ORDER_COUNT_METRIC_VERSION", 2)
+    updated = await graph.ainvoke(request)
+    updated_cached = await graph.ainvoke(request)
 
-    origins = [
-        next(
-            step["detail"]["sql_origin"] for step in run["trace"] if step["node"] == "sql_generator"
-        )
-        for run in (first, second)
+    runs = (first, cached, updated, updated_cached)
+    assert [run["sql_origin"] for run in runs] == [
+        "controlled_compiler", "controlled_cache", "controlled_compiler", "controlled_cache",
     ]
-    assert origins == ["controlled_compiler", "controlled_cache"]
-    assert second["sql_result"]["ok"]
+    assert all(run["sql_result"]["ok"] for run in runs)
 
 
 @needs_pg

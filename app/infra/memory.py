@@ -23,6 +23,7 @@
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from app.core.logging import get_logger
@@ -45,6 +46,15 @@ CREATE TABLE IF NOT EXISTS mem.preferences (
     CONSTRAINT preferences_session_term_key UNIQUE (session_id, term)
 );
 CREATE INDEX IF NOT EXISTS preferences_session_idx ON mem.preferences (session_id);
+CREATE TABLE IF NOT EXISTS mem.session_metrics (
+    api_key_hash      TEXT    NOT NULL,
+    session_id        TEXT    NOT NULL,
+    metric_name       TEXT    NOT NULL,
+    definition        JSONB   NOT NULL,
+    definition_digest TEXT    NOT NULL,
+    revision          INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (api_key_hash, session_id, metric_name)
+);
 """
 
 
@@ -72,6 +82,41 @@ async def load_preferences(session_id: str) -> dict[str, str]:
     except Exception as e:
         log.warning("memory.load_degraded", extra={"context": {"reason": str(e)[:120]}})
         return {}
+
+
+async def load_session_metric(
+    api_key_hash: str, session_id: str, question: str,
+) -> dict[str, Any] | None:
+    """读取当前会话中被问题提到的已确认指标，优先选更具体的名称。"""
+    definition = await admin_pool().fetchval(
+        """
+        SELECT definition FROM mem.session_metrics
+        WHERE api_key_hash = $1 AND session_id = $2 AND strpos($3, metric_name) > 0
+        ORDER BY char_length(metric_name) DESC, metric_name
+        LIMIT 1
+        """,
+        api_key_hash, session_id, question,
+    )
+    return json.loads(definition) if definition is not None else None
+
+
+async def save_session_metric(
+    api_key_hash: str, session_id: str, definition: dict[str, Any], digest: str,
+) -> None:
+    """保存用户确认的定义，同一内容重复确认时保持修订号。"""
+    await admin_pool().execute(
+        """
+        INSERT INTO mem.session_metrics AS current
+            (api_key_hash, session_id, metric_name, definition, definition_digest)
+        VALUES ($1, $2, $3, $4::jsonb, $5)
+        ON CONFLICT (api_key_hash, session_id, metric_name) DO UPDATE
+        SET definition = EXCLUDED.definition,
+            definition_digest = EXCLUDED.definition_digest,
+            revision = current.revision + 1
+        WHERE current.definition_digest IS DISTINCT FROM EXCLUDED.definition_digest
+        """,
+        api_key_hash, session_id, definition["name"], json.dumps(definition), digest,
+    )
 
 
 async def remember_preference(

@@ -22,6 +22,30 @@ export interface ApprovalEvent {
   sql: string
 }
 
+export interface MetricDraft {
+  draft_id: string
+  version: number
+  definition_digest: string
+  definition: {
+    name: string
+    population: string
+    formula: string
+    filters: string[]
+    time_basis: string
+    unit: string
+  }
+}
+
+export type MetricDecision = Pick<MetricDraft, 'draft_id' | 'version' | 'definition_digest'> & {
+  approved: boolean
+}
+
+export interface MetricConfirmationEvent {
+  event: 'metric_confirmation'
+  type: 'metric_confirmation'
+  draft: MetricDraft
+}
+
 export interface ResultEvent {
   event: 'result'
   summary: string
@@ -42,6 +66,7 @@ export type AskEvent =
   | NodeDoneEvent
   | ClarificationEvent
   | ApprovalEvent
+  | MetricConfirmationEvent
   | ResultEvent
   | ErrorEvent
 

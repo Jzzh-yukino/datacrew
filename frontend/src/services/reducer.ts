@@ -1,8 +1,12 @@
 // 一次"提问轮次"的状态机（纯函数：state + action -> state，可单测、可时间旅行调试）。
 // 与后端边界：这里的 action 只来自 SSE 事件，不掺任何网络/UI 细节。
-import type { AskEvent, ClarificationEvent, ApprovalEvent, ResultEvent, NodeDoneEvent } from '@/types/events'
+import type {
+  AskEvent, ClarificationEvent, ApprovalEvent, MetricDraft, ResultEvent, NodeDoneEvent,
+} from '@/types/events'
 
-export type Phase = 'idle' | 'running' | 'clarifying' | 'approving' | 'done' | 'error' | 'cancelled'
+export type Phase =
+  | 'idle' | 'running' | 'clarifying' | 'approving' | 'confirming_metric'
+  | 'done' | 'error' | 'cancelled'
 
 export interface TimelineEntry {
   node: string
@@ -16,6 +20,7 @@ export interface AskState {
   timeline: TimelineEntry[]
   clarification?: ClarificationEvent
   approval?: ApprovalEvent
+  metricDraft?: MetricDraft
   result?: ResultEvent
   error?: string
 }
@@ -28,6 +33,7 @@ export const initialState: AskState = {
 
 export type AskAction =
   | { type: 'start'; question: string }
+  | { type: 'resume' }
   | { type: 'event'; ev: AskEvent }
   | { type: 'reset' }
   | { type: 'cancel' }
@@ -36,6 +42,8 @@ export function askReducer(state: AskState, action: AskAction): AskState {
   switch (action.type) {
     case 'start':
       return { ...initialState, phase: 'running', question: action.question }
+    case 'resume':
+      return { ...state, phase: 'running', metricDraft: undefined }
     case 'reset':
       return initialState
     case 'cancel':
@@ -60,10 +68,12 @@ function applyEvent(state: AskState, ev: AskEvent): AskState {
       return { ...state, phase: 'clarifying', clarification: ev as ClarificationEvent }
     case 'approval':
       return { ...state, phase: 'approving', approval: ev as ApprovalEvent }
+    case 'metric_confirmation':
+      return { ...state, phase: 'confirming_metric', metricDraft: ev.draft }
     case 'result':
-      return { ...state, phase: 'done', result: ev as ResultEvent }
+      return { ...state, phase: 'done', metricDraft: undefined, result: ev as ResultEvent }
     case 'error':
-      return { ...state, phase: 'error', error: ev.message }
+      return { ...state, phase: 'error', metricDraft: undefined, error: ev.message }
     default:
       return state
   }

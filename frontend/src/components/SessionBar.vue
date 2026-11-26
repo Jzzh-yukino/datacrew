@@ -1,7 +1,6 @@
 <script setup lang="ts">
 // 会话条：session_id + API Key 都可运行时修改（localStorage 持久化）。
-// session_id 是 checkpointer 的 thread_id——同一 ID 跨请求延续状态，
-// 澄清/审批恢复全凭它；API Key 401/429 时在这里换 key 不用重启。
+// 同一 API 身份和会话 ID 跨请求延续问数状态。
 // 两个字段都走 emit 上报，组件自身无状态（受控组件）。
 import BaseButton from './base/BaseButton.vue'
 
@@ -20,7 +19,7 @@ const emit = defineEmits<{
 <template>
   <div class="session-bar">
     <label class="field">
-      <span>会话 ID <em>checkpointer thread_id</em></span>
+      <span>会话 ID <em>按 API 身份隔离</em></span>
       <input
         :value="sessionId"
         placeholder="demo-001"

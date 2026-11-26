@@ -17,6 +17,8 @@ from typing import Any
 
 from sqlglot import exp, select
 
+from app.tools.schema_registry import order_count_metric_spec
+
 _TOP_N = re.compile(r"(?:top|前)\s*(\d+)", re.IGNORECASE)
 _MONTH_PREFIX = re.compile(r"(?P<year>[0-9]{4})\s*年\s*(?P<month>[0-9]{1,2})\s*月\s*")
 PREVIOUS_MONTH_PREFIX = "上个月"
@@ -25,7 +27,9 @@ PREVIOUS_MONTH_PREFIX = "上个月"
 @dataclass(frozen=True)
 class CityOrderCountPlan:
     city: str
+    metric_version: int
     month_range: tuple[date, date] | None = None
+    group_by_channel: bool = False
 
     def compile_sql(self) -> str:
         city_filter = exp.EQ(
@@ -40,27 +44,34 @@ class CityOrderCountPlan:
                 exp.GTE(this=exp.column("created_at", table="o"), expression=start),
                 exp.LT(this=exp.column("created_at", table="o"), expression=end),
             ])
-        return (
-            select("COUNT(*) AS order_count")
+        dimensions = ("o.channel",) if self.group_by_channel else ()
+        query = (
+            select(*dimensions, "COUNT(*) AS order_count")
             .from_("biz.orders AS o")
             .join("biz.users AS u", on="u.id = o.user_id")
             .where(exp.and_(*filters, wrap=False))
-            .sql(dialect="postgres")
         )
+        if dimensions:
+            query = query.group_by(*dimensions).order_by(*dimensions, dialect="postgres")
+        return query.sql(dialect="postgres")
 
 
 def plan_city_order_count(
     question: str, schema_context: dict[str, Any], data_as_of: str | None = None
 ) -> CityOrderCountPlan | None:
-    """识别单城市订单量查询，按数据截止日解析相对 UTC 自然月。"""
-    question = question.strip()
+    """识别单城市订单量查询，支持按渠道分组和按 UTC 自然月过滤。"""
+    question = question.strip().rstrip("？?").rstrip()
+    question = question.removesuffix("分别是多少").rstrip()
     suffix = "的订单量"
     if not question.endswith(suffix):
         return None
-    if not any(metric["metric_name"] == "订单量" for metric in schema_context.get("metrics", [])):
+    metric_spec = order_count_metric_spec(schema_context.get("metrics", []))
+    if metric_spec is None:
         return None
 
     city = question.removesuffix(suffix)
+    group_by_channel = city.endswith("各渠道")
+    city = city.removesuffix("各渠道")
     month_range = None
     if match := _MONTH_PREFIX.match(city):
         year, month = int(match["year"]), int(match["month"])
@@ -81,7 +92,12 @@ def plan_city_order_count(
     if ["users", "city"] in matched_fields or resolved_city in schema_context.get(
         "resolved_dimensions", []
     ):
-        return CityOrderCountPlan(city, month_range)
+        return CityOrderCountPlan(
+            city=city,
+            metric_version=metric_spec["version"],
+            month_range=month_range,
+            group_by_channel=group_by_channel,
+        )
     return None
 
 
@@ -89,6 +105,13 @@ def build_query_plan_hint(question: str) -> str | None:
     """按问法返回 SQL 组合骨架；无命中返回 None。"""
     hints: list[str] = []
     q = question
+
+    if "渠道" in q or "用户来源" in q:
+        hints.append(
+            "订单渠道使用 biz.orders.channel，按渠道统计订单量或销售额时默认用它。"
+            "用户注册来源使用 biz.users.channel_source，适用于按渠道统计注册用户，"
+            "以及明确按用户来源、注册渠道或获客渠道筛选或分组的查询。"
+        )
 
     # 1) 多维度分组：各城市各渠道 / 各品类各渠道 ...
     if "各" in q and ("渠道" in q and ("城市" in q or "品类" in q or "来源" in q)):

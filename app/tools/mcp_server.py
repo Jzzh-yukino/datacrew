@@ -29,6 +29,7 @@ from app.tools.schema_registry import (
     derive_clarification_rules,
     load_foreign_keys,
     load_metric_definitions,
+    load_metric_spec,
     load_table_columns,
     normalize_metric_term,
 )
@@ -122,6 +123,12 @@ async def search_metrics(term: str) -> dict:
         (term,),
     )
     return {"metrics": [metric for metric in metrics if metric["metric_name"] in candidates]}
+
+
+@mcp.tool()
+async def get_metric_specs(metric_name: str) -> dict:
+    """按已注册指标名读取结构化口径，包括公式、粒度、必要过滤、时间、单位和版本。"""
+    return {"metric": await load_metric_spec(metric_name.strip())}
 
 
 @mcp.tool()

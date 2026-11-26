@@ -15,6 +15,7 @@ import json
 import time
 from hashlib import sha256
 from typing import Any
+from uuid import uuid4
 
 from langgraph.types import interrupt
 
@@ -32,15 +33,17 @@ from app.agents.query_planner import (
     build_query_plan_hint,
     plan_city_order_count,
 )
-from app.agents.state import AgentState
+from app.agents.state import AgentState, MetricDecision, MetricDefinition, MetricDraft
 from app.core.logging import get_logger
 from app.domain.sql_policy import INTENT_REFUSAL_TEXT, detect_forbidden_intent
 from app.infra.db import admin_pool  # noqa: TID252  数据截止日查询
 from app.infra.memory import (
     explicitly_stated,
     load_preferences,
+    load_session_metric,
     mark_preference_used,
     remember_preference,
+    save_session_metric,
 )
 from app.infra.sql_cache import sql_cache
 from app.tools.chart_gen import generate_chart
@@ -55,7 +58,7 @@ from app.tools.sql_execute import execute_sql
 log = get_logger(__name__)
 
 MAX_RETRIES = 3
-CITY_ORDER_COUNT_COMPILER_VERSION = "city-order-count:v3:utc"
+CITY_ORDER_COUNT_COMPILER_VERSION = "city-order-count:v5:utc"
 
 
 def _city_order_count_cache_key(
@@ -76,7 +79,9 @@ def _city_order_count_cache_key(
         CITY_ORDER_COUNT_COMPILER_VERSION,
         scope,
         session_id,
-        state["question"].strip(),
+        plan.city,
+        plan.group_by_channel,
+        plan.metric_version,
         metric,
         tables,
         [boundary.isoformat() for boundary in plan.month_range] if plan.month_range else None,
@@ -261,6 +266,9 @@ def _fmt_schema_context(schema_context: dict[str, Any]) -> str:
                 f"  {m['metric_name']}【{m.get('usage_hint') or '整体类'}】: {m['definition']}"
                 f"\n    SQL提示: {m['sql_hint']}"
             )
+    if definition := schema_context.get("session_metric"):
+        lines.append("\n已确认会话口径（计算定义以此为准）：")
+        lines.append(json.dumps(definition, ensure_ascii=False))
     dimensions = schema_context.get("resolved_dimensions", [])
     if dimensions:
         lines.append("\n已检索的维度值与候选过滤字段：")
@@ -363,13 +371,17 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     # 偏好只作用于"要不要打断用户"这一个决策点，其余链路完全不变。
     session_id = state.get("session_id") or ""
     prefs = await load_preferences(session_id)
+    scope = state.get("api_key_hash")
+    session_metric = await load_session_metric(scope, session_id, question) if scope else None
+    if session_metric:
+        schema_context["session_metric"] = session_metric
 
     # 1.8 规则优先澄清（DC-4）：术语在注册表里对应多个口径、且问题没有限定词
     #     -> 确定性 interrupt，不调用 LLM（省钱且行为稳定）。LLM 歧义判定
     #     保留为补充：规则没命中时才看模型输出（见下方第 4 步）。
     clarified = state.get("clarified_answer")
     rule_preference: str | None = None
-    if not clarified:
+    if not clarified and not session_metric:
         rule = match_clarification_rule(question, schema_context)
         if rule:
             term = str(rule["term"])
@@ -411,12 +423,17 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
 
     relative_month = question.strip().startswith(PREVIOUS_MONTH_PREFIX)
     as_of = await _data_as_of(fallback_to_today=False) if relative_month else None
-    if not clarified and (plan := plan_city_order_count(question, schema_context, as_of)):
+    if not clarified and not session_metric and (
+        plan := plan_city_order_count(question, schema_context, as_of)
+    ):
         cache_key = _city_order_count_cache_key(state, schema_context, plan)
         cached_sql = sql_cache.get(cache_key) if cache_key is not None else None
         if cached_sql is not None:
             return {
-                "schema_context": {**schema_context, "cached_city_order_count_sql": cached_sql},
+                "schema_context": {
+                    **schema_context,
+                    "cached_city_order_count": {"key": cache_key, "sql": cached_sql},
+                },
                 "ambiguity": None,
                 "clarified_answer": None,
                 "data_as_of": as_of,
@@ -438,6 +455,7 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
         {"role": "system", "content": (
             SCHEMA_CURATOR_SYSTEM
             + "\n分析业务指标时，可调用 search_metrics 核对核心术语的候选口径。"
+            + "\n已确定指标名后，可调用 get_metric_specs 获取已结构化的计算和时间口径。"
             + "\n需要确认 JOIN 条件时，可调用 describe_schema 获取表声明的外键。"
             + "\n需要确认过滤值对应的字段时，可调用 resolve_dimension_values。"
             + f"\n当前日期：{today}"
@@ -480,6 +498,24 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
             "trace": [_step("schema_curator", started, refused="unanswerable",
                             missing=missing, unresolved=unresolved)],
         }
+
+    if (candidate := analysis.get("metric_draft")) is not None:
+        definition = MetricDefinition.model_validate(candidate).model_dump()
+        if definition != session_metric:
+            definition_json = json.dumps(definition, sort_keys=True)
+            draft: MetricDraft = {
+                "draft_id": uuid4().hex,
+                "version": 1,
+                "definition_digest": sha256(definition_json.encode()).hexdigest(),
+                "definition": definition,
+            }
+            return {
+                "schema_context": schema_context,
+                "data_as_of": as_of,
+                "metric_draft": draft,
+                "status": "awaiting_metric_confirmation",
+                "trace": [_step("schema_curator", started, metric_draft=True)],
+            }
 
     # 4. 歧义处理（LLM 补充）：规则没命中时才追问；已澄清过直接放行防死循环
     ambiguity = analysis.get("ambiguity")
@@ -543,28 +579,63 @@ async def schema_curator_node(state: AgentState) -> dict[str, Any]:
     }
 
 
+async def metric_confirmation_node(state: AgentState) -> dict[str, Any]:
+    """等待对冻结草案的决定，确认后保存并生成本轮 SQL。"""
+    started = time.perf_counter()
+    draft = state["metric_draft"]
+    assert draft is not None
+    value = interrupt({"type": "metric_confirmation", "draft": draft})
+    decision = MetricDecision.model_validate(value)
+    if not decision.matches(draft):
+        return {"status": "failed", "error": "口径草案已变更，请重新提问。"}
+    if not decision.approved:
+        return {
+            "status": "done",
+            "metric_draft": None,
+            "insight": {"summary": "已拒绝新口径草案，本轮查询结束。"},
+            "trace": [_step("metric_confirmation", started, approved=False)],
+        }
+
+    definition = draft["definition"]
+    await save_session_metric(
+        state["api_key_hash"], state["session_id"], definition, draft["definition_digest"],
+    )
+    return {
+        "status": "running",
+        "metric_draft": None,
+        "schema_context": {**state["schema_context"], "session_metric": definition},
+        "trace": [_step("metric_confirmation", started, approved=True)],
+    }
+
+
 # ---------------------------------------------------------------- SQLGenerator
 async def sql_generator_node(state: AgentState) -> dict[str, Any]:
     """生成 SQL；有 last_error 时进入自愈模式（错误回灌）。"""
     started = time.perf_counter()
     schema_context = state.get("schema_context") or {}
-    if not state.get("last_error") and not state.get("clarified_answer"):
+    if (
+        not state.get("last_error") and not state.get("clarified_answer")
+        and not schema_context.get("session_metric")
+    ):
         plan = plan_city_order_count(state["question"], schema_context, state.get("data_as_of"))
         if plan is not None:
-            cached_sql = schema_context.get("cached_city_order_count_sql")
+            cache_key = _city_order_count_cache_key(state, schema_context, plan)
+            cached = schema_context.get("cached_city_order_count")
+            cached_sql = cached["sql"] if cached and cached["key"] == cache_key else None
             origin = "controlled_cache" if cached_sql is not None else "controlled_compiler"
+            filters = "城市和 UTC 月份" if plan.month_range is not None else "城市"
+            aggregation = "按渠道统计" if plan.group_by_channel else "统计"
             return {
                 "sql": cached_sql if cached_sql is not None else plan.compile_sql(),
                 "sql_origin": origin,
-                "sql_cache_key": _city_order_count_cache_key(state, schema_context, plan),
-                "sql_reasoning": (
-                    "按指定城市和 UTC 月份统计所有状态的订单数。"
-                    if plan.month_range is not None
-                    else "按城市过滤并统计所有状态的订单数。"
-                ),
+                "sql_cache_key": cache_key,
+                "sql_reasoning": f"按{filters}过滤并{aggregation}所有状态的订单数。",
                 "retry_count": 0,
                 "last_error": None,
-                "trace": [_step("sql_generator", started, retry=0, sql_origin=origin)],
+                "trace": [_step(
+                    "sql_generator", started, retry=0, sql_origin=origin,
+                    metric_version=plan.metric_version,
+                )],
             }
 
     schema_ctx = _fmt_schema_context(schema_context)

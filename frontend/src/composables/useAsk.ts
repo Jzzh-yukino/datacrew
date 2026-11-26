@@ -17,7 +17,7 @@ import type { AskEvent } from '@/types/events'
 
 const INACTIVITY_MS = 30_000
 const DEFAULT_API_KEY = import.meta.env.VITE_API_KEY ?? 'dev-key-001'
-const LIVE_PHASES = ['running', 'clarifying', 'approving']
+const LIVE_PHASES = ['running', 'clarifying', 'approving', 'confirming_metric']
 const API_KEY_STORAGE = 'datacrew.apiKey'
 
 function loadApiKey(): string {
@@ -81,7 +81,7 @@ export function useAsk() {
         r.arm() // 每个事件都是"活着"的证据，重置 deadline
       }
       if (r.settled !== 'cancelled' && state.value.phase === 'running') {
-        fail('连接中断：流已结束但未收到终态事件（澄清 / 审批 / 结果 / 错误）。请重试或检查后端')
+        fail('连接中断：流已结束但未收到终态事件。请重试或检查后端')
       }
     } catch (e) {
       if (r.settled) return // 取消/超时路径已收口
@@ -127,6 +127,16 @@ export function useAsk() {
     return run(resumeStream(sessionId.value, { approved }, apiKey.value, r.signal))
   }
 
+  function decideMetric(approved: boolean) {
+    if (running.value || state.value.phase !== 'confirming_metric' || !state.value.metricDraft) return
+    const { draft_id, version, definition_digest } = state.value.metricDraft
+    state.value = askReducer(state.value, { type: 'resume' })
+    const r = newRound()
+    return run(resumeStream(
+      sessionId.value, { draft_id, version, definition_digest, approved }, apiKey.value, r.signal,
+    ))
+  }
+
   // 取消：同步收口（round.cancel 不等 abort 传播，tests/round.test.ts 锁死）
   function cancel() {
     round?.cancel()
@@ -144,6 +154,6 @@ export function useAsk() {
     state, running, errorMessage, apiKey, setApiKey,
     sessionId, setSessionId: setSessionIdValue,
     healthState, healthDown, probeNow,
-    ask, answerClarification, decideApproval, cancel, reset,
+    ask, answerClarification, decideApproval, decideMetric, cancel, reset,
   }
 }

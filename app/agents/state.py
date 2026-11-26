@@ -12,6 +12,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, Literal, TypedDict
 
+from pydantic import BaseModel, ConfigDict, StringConstraints
+
 
 class Ambiguity(TypedDict, total=False):
     """指标口径歧义（如"销售额" = GMV 还是实付）。"""
@@ -27,6 +29,38 @@ class Approval(TypedDict, total=False):
     needed: bool
     reason: str
     approved: bool
+
+
+class MetricDefinition(BaseModel):
+    """用于用户确认的业务计算定义。"""
+
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+    population: str
+    formula: str
+    filters: list[str]
+    time_basis: str
+    unit: str
+
+
+class MetricDraft(TypedDict):
+    draft_id: str
+    version: int
+    definition_digest: str
+    definition: dict[str, Any]
+
+
+class MetricDecision(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    draft_id: str
+    version: int
+    definition_digest: str
+    approved: bool
+
+    def matches(self, draft: MetricDraft) -> bool:
+        return (self.draft_id, self.version, self.definition_digest) == (
+            draft["draft_id"], draft["version"], draft["definition_digest"],
+        )
 
 
 class TraceStep(TypedDict, total=False):
@@ -47,6 +81,7 @@ class AgentState(TypedDict, total=False):
     schema_context: dict[str, Any]     # {"tables": [...], "metrics": [...]}
     ambiguity: Ambiguity | None
     data_as_of: str | None            # 数据截止日：相对时间的推算锚点（不是系统今天）
+    metric_draft: MetricDraft | None
 
     # ---- SQLGenerator 产物 ----
     sql: str | None

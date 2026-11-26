@@ -1,4 +1,4 @@
-"""Supervisor 状态机：LangGraph 编排四 Agent + 澄清/自愈/审批三条控制流。
+"""Supervisor 状态机：LangGraph 编排问数、澄清、口径确认、查询自愈和审批。
 
 状态机全景：
     START -> schema_curator -> sql_generator -> executor --+
@@ -9,10 +9,11 @@
     executor --(重试耗尽/用户拒绝)--> END(failed)
     schema_curator --(元数据类问题)--> END(refused：拒答话术走 result.summary)
 
-三条控制流（本项目的面试核心叙事）：
+控制流：
     1. 澄清：schema_curator 内 interrupt() —— 口径歧义时暂停，追问用户后恢复
     2. 自愈：executor 错误 -> 条件边回到 sql_generator（错误回灌），最多 3 轮
     3. 审批：executor 内 interrupt() —— 大表无过滤查询暂停，人工批准后带 approved 重跑
+    4. 口径确认：metric_confirmation 内 interrupt() —— 展示草案，暂停 SQL 生成
 
 为什么用 LangGraph 而不是自己写 while 循环（面试可讲）：
     - interrupt/resume 是框架原语：human-in-the-loop 不用自己造协程状态保存
@@ -29,6 +30,7 @@ from langgraph.types import RetryPolicy
 from app.agents.nodes import (
     executor_node,
     insight_writer_node,
+    metric_confirmation_node,
     schema_curator_node,
     sql_generator_node,
 )
@@ -39,7 +41,7 @@ from app.core.logging import get_logger
 log = get_logger(__name__)
 
 Route = Literal["sql_generator", "insight_writer", "__end__"]
-CuratorRoute = Literal["sql_generator", "__end__"]
+CuratorRoute = Literal["sql_generator", "metric_confirmation", "__end__"]
 
 
 def _route_after_curator(state: AgentState) -> CuratorRoute:
@@ -50,7 +52,13 @@ def _route_after_curator(state: AgentState) -> CuratorRoute:
     """
     if state.get("refusal"):
         return END
+    if state.get("metric_draft"):
+        return "metric_confirmation"
     return "sql_generator"
+
+
+def _route_after_metric_confirmation(state: AgentState) -> CuratorRoute:
+    return "sql_generator" if state.get("status") == "running" else END
 
 
 def _route_after_executor(state: AgentState) -> Route:
@@ -68,6 +76,7 @@ def build_graph(checkpointer=None):
     builder = StateGraph(AgentState)
 
     builder.add_node("schema_curator", schema_curator_node)
+    builder.add_node("metric_confirmation", metric_confirmation_node)
     builder.add_node("sql_generator", sql_generator_node)
     builder.add_node(
         "executor",
@@ -81,6 +90,11 @@ def build_graph(checkpointer=None):
     builder.add_conditional_edges(
         "schema_curator",
         _route_after_curator,
+        {"sql_generator": "sql_generator", "metric_confirmation": "metric_confirmation", END: END},
+    )
+    builder.add_conditional_edges(
+        "metric_confirmation",
+        _route_after_metric_confirmation,
         {"sql_generator": "sql_generator", END: END},
     )
     builder.add_edge("sql_generator", "executor")

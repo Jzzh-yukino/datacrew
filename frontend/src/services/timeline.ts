@@ -13,6 +13,7 @@ export const NODE_LABELS: Record<string, string> = {
   insight_writer: '结论撰写',
   clarification: '口径澄清',
   approval: '人工审批',
+  metric_confirmation: '确认口径',
 }
 
 /** 节点 → 时间线圆点颜色（与状态语义一致：执行绿/生成蓝/澄清审批黄）。 */
@@ -23,6 +24,7 @@ export const NODE_TONES: Record<string, string> = {
   insight_writer: 'accent-2',
   clarification: 'warn',
   approval: 'warn',
+  metric_confirmation: 'warn',
 }
 
 export interface TimelineRow {

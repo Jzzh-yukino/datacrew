@@ -25,7 +25,9 @@ log = get_logger(__name__)
 
 _FENCE = chr(96) * 3  # 三个反引号：LLM 常把 JSON 包在代码块里
 MAX_SCHEMA_RETRIEVAL_ROUNDS = 2
-SCHEMA_RETRIEVAL_TOOLS = ("search_metrics", "describe_schema", "resolve_dimension_values")
+SCHEMA_RETRIEVAL_TOOLS = (
+    "search_metrics", "get_metric_specs", "describe_schema", "resolve_dimension_values",
+)
 
 
 class ToolResult(NamedTuple):

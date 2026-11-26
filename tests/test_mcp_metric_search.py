@@ -19,6 +19,7 @@ from app.tools.schema_registry import invalidate_cache
 async def metric_catalog(monkeypatch):
     metrics = [
         {"metric_name": "GMV", "definition": "按下单口径计算销售额"},
+        {"metric_name": "订单量", "definition": "按订单行计数，包含所有订单状态"},
         {"metric_name": "实付销售额", "definition": "支付成功订单的实付金额总和"},
         {"metric_name": "客单价", "definition": "实付销售额除以支付成功订单数"},
         {
@@ -42,6 +43,25 @@ async def test_search_metrics_returns_both_sales_amount_definitions(
     content = await mcp.call_tool("search_metrics", {"term": term})
     result = json.loads(content[0].text)
     assert {metric["metric_name"] for metric in result["metrics"]} == {"GMV", "实付销售额"}
+
+
+async def test_get_metric_specs_returns_registered_order_count(metric_catalog) -> None:
+    content = await mcp.call_tool("get_metric_specs", {"metric_name": "订单量"})
+    assert json.loads(content[0].text) == {
+        "metric": {
+            "metric_name": "订单量",
+            "version": 1,
+            "calculation": {"operation": "count_rows", "table": "biz.orders"},
+            "grain": "biz.orders.id",
+            "required_filters": [],
+            "time": {
+                "field": "biz.orders.created_at",
+                "timezone": "UTC",
+                "relative_anchor": "data_as_of",
+            },
+            "unit": "单",
+        },
+    }
 
 
 @pytest.mark.parametrize(
@@ -77,7 +97,7 @@ async def test_model_receives_metric_definitions_from_mcp(
         if len(results) < len(tool_calls):
             assert tool_choice != "none", "模型还需要补查口径"
             assert {tool["function"]["name"] for tool in tools} == {
-                "search_metrics", "describe_schema", "resolve_dimension_values"
+                "search_metrics", "get_metric_specs", "describe_schema", "resolve_dimension_values"
             }
             message = {"role": "assistant", "tool_calls": [tool_calls[len(results)]]}
             finish_reason = "tool_calls"

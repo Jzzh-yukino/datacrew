@@ -52,8 +52,8 @@ class TestFreshTurnFields:
         from app.agents.state import AgentState
 
         # trace 是 operator.add 累积通道（排查询链刻意全量保留），不参与重置；
-        # question/session_id 由 astream 输入本身赋值。
-        skip = {"question", "session_id", "trace"}
+        # 当前问题、会话和身份由每次 astream 输入提供。
+        skip = {"question", "session_id", "api_key_hash", "trace"}
         missing = set(AgentState.__annotations__) - skip - set(_FRESH_TURN_FIELDS)
         assert not missing, f"这些字段每轮开始会被上一轮污染: {missing}"
 

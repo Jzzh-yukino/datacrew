@@ -9,13 +9,14 @@ import SessionBar from '@/components/SessionBar.vue'
 import EventTimeline from '@/components/EventTimeline.vue'
 import ClarificationCard from '@/components/ClarificationCard.vue'
 import ApprovalCard from '@/components/ApprovalCard.vue'
+import MetricConfirmationCard from '@/components/MetricConfirmationCard.vue'
 import ResultCard from '@/components/ResultCard.vue'
 import { useAsk } from '@/composables/useAsk'
 
 const {
   state, running, errorMessage, apiKey, setApiKey,
   sessionId, setSessionId, healthDown, healthState, probeNow,
-  ask, answerClarification, decideApproval, cancel, reset,
+  ask, answerClarification, decideApproval, decideMetric, cancel, reset,
 } = useAsk()
 
 // 不可达持续多久：给用户"等了多久"的实感，也帮判断是不是真死了
@@ -31,6 +32,7 @@ const PHASE_META: Record<string, { label: string; tone: string }> = {
   running: { label: '执行中', tone: 'accent' },
   clarifying: { label: '等待人工澄清', tone: 'warn' },
   approving: { label: '等待人工审批', tone: 'warn' },
+  confirming_metric: { label: '等待确认口径', tone: 'warn' },
   done: { label: '已完成', tone: 'ok' },
   error: { label: '失败', tone: 'err' },
   cancelled: { label: '已取消', tone: '' },
@@ -85,6 +87,13 @@ const phaseMeta = computed(() => PHASE_META[state.value.phase] ?? { label: state
         :reason="state.approval.reason"
         :sql="state.approval.sql"
         @decide="decideApproval"
+      />
+
+      <MetricConfirmationCard
+        v-if="state.phase === 'confirming_metric' && state.metricDraft"
+        :definition="state.metricDraft.definition"
+        :disabled="running"
+        @decide="decideMetric"
       />
 
       <ResultCard v-if="state.result" :result="state.result" :api-key="apiKey" />

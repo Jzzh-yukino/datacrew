@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 // UI 端到端旅程：AskView 把事件渲染成正确的界面。
 // 与 tests/api.stream.test.ts 的分工：那个锁"流式管道收敛"，这个锁"AskView 编排"。
-// 两块回归：
+// 旅程回归：
 //   ① 澄清卡 → 人类回答 → 结果卡，全程无错误横幅（30s 看门狗不得误报）；
 //   ② 页面在后端不可达时打开 → 后端恢复 → 横幅消失、提问解锁
 //      （曾经的坑：isDown 是普通 getter，解构即固化，"后端恢复了横幅永不消"）。
@@ -24,12 +24,12 @@ const RESUME_CHUNKS = [
 ]
 
 // 可控后端：健康灯可开关；/ask 与 /ask/resume 按块交付真实帧
-function stubBackend(opts: { healthOk: () => boolean }) {
+function stubBackend(opts: { healthOk: () => boolean; askChunks?: string[] }) {
   const enc = new TextEncoder()
-  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+  const fetch = vi.fn(async (url: string, _init?: RequestInit) => {
     const u = String(url)
     if (u.endsWith('/health')) return { ok: opts.healthOk() }
-    const chunks = u.endsWith('/ask/resume') ? RESUME_CHUNKS : ASK_CHUNKS
+    const chunks = u.endsWith('/ask/resume') ? RESUME_CHUNKS : (opts.askChunks ?? ASK_CHUNKS)
     let i = 0
     return {
       ok: true,
@@ -47,7 +47,9 @@ function stubBackend(opts: { healthOk: () => boolean }) {
         }),
       },
     } as unknown as Response
-  }))
+  })
+  vi.stubGlobal('fetch', fetch)
+  return fetch
 }
 
 describe('AskView 旅程', () => {
@@ -85,5 +87,38 @@ describe('AskView 旅程', () => {
     await vi.waitFor(() => expect(w.text()).toContain('查询完成'))
     expect(w.text()).not.toContain('无新事件')
     expect(w.text()).not.toContain('连接中断')
+  })
+
+  it.each([['确认并查询', true], ['拒绝', false]])('口径草案的「%s」回传完整草案凭据', async (label, approved) => {
+    const draft = {
+      draft_id: 'draft-1', version: 1, definition_digest: 'digest-1',
+      definition: {
+        name: '优质订单量', population: '订单', formula: '统计订单数',
+        filters: ['实付金额大于 100 元'], time_basis: '下单时间', unit: '单',
+      },
+    }
+    const fetch = stubBackend({
+      healthOk: () => true,
+      askChunks: [frame('metric_confirmation', `"type":"metric_confirmation","draft":${JSON.stringify(draft)}`)],
+    })
+    const w = mount(AskView)
+    await flushPromises()
+
+    await w.find('textarea').setValue('新增指标优质订单量')
+    await w.find('textarea').trigger('keydown.enter')
+    await vi.waitFor(() => expect(w.find('.metric-confirmation').text()).toContain('实付金额大于 100 元'))
+
+    const button = w.findAll('.metric-confirmation button').find((item) => item.text() === label)!
+    await vi.waitFor(() => expect((button.element as HTMLButtonElement).disabled).toBe(false))
+    await button.trigger('click')
+    await vi.waitFor(() => expect(w.text()).toContain('查询完成'))
+
+    const sent = fetch.mock.calls.find(([url]) => url.endsWith('/ask/resume'))
+    expect(JSON.parse(String(sent?.[1]?.body)).value).toEqual({
+      draft_id: draft.draft_id, version: draft.version,
+      definition_digest: draft.definition_digest, approved,
+    })
+    expect(w.find('.metric-confirmation').exists()).toBe(false)
+    w.unmount()
   })
 })

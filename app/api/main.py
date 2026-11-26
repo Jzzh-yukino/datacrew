@@ -19,7 +19,9 @@ from contextlib import asynccontextmanager, suppress
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 
+from app.agents.state import MetricDecision
 from app.application.ask_service import ask, resume
 from app.core.config import get_settings
 from app.core.logging import get_logger, setup_logging
@@ -179,20 +181,32 @@ async def resume_endpoint(
     # 也返回 200 + 旧终态。现在先查状态机当前有没有挂起中断、类型对不对。
     from app.application.ask_service import pending_interrupt
 
-    pending = await pending_interrupt(session_id)
-    if pending is None:
+    scope = api_key_fingerprint(api_key)
+    interrupt = await pending_interrupt(session_id, scope)
+    if interrupt is None:
         raise HTTPException(status_code=409, detail="没有等待恢复的中断（会话未暂停）")
+    pending = interrupt.value
     value = body["value"]
-    if pending.get("type") == "clarification" and not isinstance(value, str):
+    if pending["type"] == "metric_confirmation":
+        try:
+            decision = MetricDecision.model_validate(value)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=400, detail="请提交草案 ID、版本、摘要及确认决定",
+            ) from exc
+        if not decision.matches(pending["draft"]):
+            raise HTTPException(status_code=409, detail="口径草案已变更，请重新提问")
+    elif pending["type"] == "clarification" and not isinstance(value, str):
         raise HTTPException(status_code=400, detail="澄清中断需要字符串形式的回答")
-    if pending.get("type") == "approval" and not isinstance(value, dict):
+    elif pending["type"] == "approval" and (
+        not isinstance(value, dict) or set(value) != {"approved"}
+        or not isinstance(value["approved"], bool)
+    ):
         raise HTTPException(status_code=400, detail='审批中断需要 {"approved": true/false} 对象')
 
     async def gen() -> AsyncIterator[str]:
         try:
-            async for event in resume(
-                session_id, body["value"], api_key_fingerprint(api_key)
-            ):
+            async for event in resume(session_id, value, scope, interrupt_id=interrupt.id):
                 yield _sse(event)
         except Exception as e:
             log.exception("resume.failed")

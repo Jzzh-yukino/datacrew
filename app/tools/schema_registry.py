@@ -123,6 +123,7 @@ async def load_foreign_keys(table: str) -> list[dict]:
 
 
 METRICS_CACHE_KEY = "schema:metric_definitions"
+ORDER_COUNT_METRIC_VERSION = 1
 
 
 async def load_metric_definitions(use_cache: bool = True) -> list[dict]:
@@ -154,6 +155,33 @@ async def load_metric_definitions(use_cache: bool = True) -> list[dict]:
         await cache_set(METRICS_CACHE_KEY, metrics, CACHE_TTL_S)
         _l1_metrics = (metrics, time.monotonic() + L1_TTL_S)
     return metrics
+
+
+def order_count_metric_spec(metrics: list[dict]) -> dict | None:
+    """从当前注册表确认订单量可用，并读取工具和查询计划共用的口径。"""
+    if not any(metric["metric_name"] == "订单量" for metric in metrics):
+        return None
+
+    return {
+        "metric_name": "订单量",
+        "version": ORDER_COUNT_METRIC_VERSION,
+        "calculation": {"operation": "count_rows", "table": "biz.orders"},
+        "grain": "biz.orders.id",
+        "required_filters": [],
+        "time": {
+            "field": "biz.orders.created_at",
+            "timezone": "UTC",
+            "relative_anchor": "data_as_of",
+        },
+        "unit": "单",
+    }
+
+
+async def load_metric_spec(metric_name: str) -> dict | None:
+    """返回已注册指标的结构化计算口径。"""
+    if metric_name != "订单量":
+        return None
+    return order_count_metric_spec(await load_metric_definitions())
 
 
 # ---- 规则优先澄清（DC-4）----------------------------------------------------

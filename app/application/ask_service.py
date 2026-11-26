@@ -9,7 +9,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
-from langgraph.types import Command
+from langgraph.types import Command, Interrupt
 
 from app.agents.supervisor import build_production_graph
 from app.core.logging import get_logger
@@ -38,9 +38,8 @@ async def _get_graph():
     return _graph
 
 
-def _config(session_id: str) -> dict[str, Any]:
-    # thread_id = session_id：同一会话的状态在 checkpointer 里跨请求延续
-    return {"configurable": {"thread_id": session_id}}
+def _config(session_id: str, api_key_hash: str) -> dict[str, Any]:
+    return {"configurable": {"thread_id": f"{api_key_hash}:{session_id}"}}
 
 
 async def _save_turn(
@@ -52,7 +51,7 @@ async def _save_turn(
 ) -> None:
     """图结束后把本轮 focus/摘要写回短期记忆；失败不影响已发出的结果。"""
     try:
-        state = await graph.aget_state(_config(session_id))
+        state = await graph.aget_state(_config(session_id, api_key_hash))
         values = dict(state.values or {})
     except Exception as e:
         log.warning("dialogue.state_read_failed", extra={"context": {"reason": str(e)[:100]}})
@@ -136,7 +135,7 @@ async def _events_after_stream(graph, config) -> AsyncIterator[dict[str, Any]]:
 # 而是落在 mem.preferences（见 app/infra/memory.py），所以它天然不受本重置影响。
 #
 # 每轮问数开始前重置的字段（最终审查修复：同 session 二次提问状态污染）。
-# thread_id=session_id 意味着旧 checkpoint 的字段会延续到新一轮：不清洗的话，
+# 同一身份和会话的 checkpoint 字段会延续到新一轮：不清洗的话，
 # 上一轮的 clarified_answer 会让新一轮的歧义问题永不再追问、上一轮的 error
 # 文案会挂在新一轮的成功结果上——README"按 session 恢复会话"变成串味。
 # trace 是 operator.add 累积通道（刻意保留全量排查询链），不重置。
@@ -146,6 +145,7 @@ _FRESH_TURN_FIELDS: dict[str, Any] = {
     "schema_context": None,
     "ambiguity": None,
     "data_as_of": None,
+    "metric_draft": None,
     "sql": None,
     "sql_origin": None,
     "sql_cache_key": None,
@@ -161,13 +161,13 @@ _FRESH_TURN_FIELDS: dict[str, Any] = {
 }
 
 
-async def _reset_turn_state(graph, session_id: str) -> None:
+async def _reset_turn_state(graph, session_id: str, api_key_hash: str = "default") -> None:
     """把上一轮的产物字段清成初值（尽力而为：checkpointer 故障不阻塞提问）。
 
     必须用 aupdate_state：AsyncPostgresSaver 只允许 async 接口，同步
     update_state 会 InvalidStateError（实测 120 题每题 reset_failed 的根因）。"""
     try:
-        await graph.aupdate_state(_config(session_id), _FRESH_TURN_FIELDS)
+        await graph.aupdate_state(_config(session_id, api_key_hash), _FRESH_TURN_FIELDS)
     except Exception as e:  # 重置失败不该让用户问不了数，最坏是串味
         log.warning("ask.reset_failed", extra={"context": {"reason": str(e)[:100]}})
 
@@ -191,7 +191,8 @@ async def ask(
         memory = await load_dialogue_memory(session_id, api_key_hash)
         graph_question = augment_question(question, memory)
         context = build_memory_context(memory, question)
-        await _reset_turn_state(graph, session_id)
+        await _reset_turn_state(graph, session_id, api_key_hash)
+        config = _config(session_id, api_key_hash)
         async for ev in _node_events(
             graph.astream(
                 {
@@ -201,28 +202,24 @@ async def ask(
                     "dialogue_context": context,
                     "status": "running",
                 },
-                _config(session_id),
+                config,
                 stream_mode="updates",
             )
         ):
             yield ev
-        async for ev in _events_after_stream(graph, _config(session_id)):
+        async for ev in _events_after_stream(graph, config):
             yield ev
         await _save_turn(graph, session_id, api_key_hash, question, memory)
 
 
-async def pending_interrupt(session_id: str) -> dict | None:
-    """当前 session 是否有挂起的中断；有则返回 {"type": ..., ...payload}。
-
-    API 层用它校验 /ask/resume 的 value 与中断类型匹配，并拒绝对未暂停
-    会话的 resume（409）。无 checkpointer 的测试环境下安全返回 None。
-    """
+async def pending_interrupt(session_id: str, api_key_hash: str) -> Interrupt | None:
+    """读取指定身份和会话当前的中断。"""
     graph = await _get_graph()
     try:
-        state = await graph.aget_state(_config(session_id))
+        state = await graph.aget_state(_config(session_id, api_key_hash))
         for task in state.tasks:
             if task.interrupts:
-                return dict(task.interrupts[0].value)
+                return task.interrupts[0]
     except Exception as e:
         log.warning("resume.pending_check_failed",
                    extra={"context": {"reason": str(e)[:80]}})
@@ -232,6 +229,8 @@ async def resume(
     session_id: str,
     value: Any,
     api_key_hash: str = "default",
+    *,
+    interrupt_id: str | None = None,
 ) -> AsyncIterator[dict[str, Any]]:
     """恢复执行：把用户的澄清回答 / 审批决定注入中断点，继续跑。"""
     graph = await _get_graph()
@@ -244,14 +243,21 @@ async def resume(
                 "message": "当前会话上一条请求还在处理，请稍后重试",
             }
             return
+        if interrupt_id is not None:
+            pending = await pending_interrupt(session_id, api_key_hash)
+            if pending is None or pending.id != interrupt_id:
+                yield {"event": "error", "message": "等待恢复的请求已变更，请重新提问。"}
+                return
+            value = {interrupt_id: value}
         memory = await load_dialogue_memory(session_id, api_key_hash)
+        config = _config(session_id, api_key_hash)
         async for ev in _node_events(
             graph.astream(
-                Command(resume=value), _config(session_id), stream_mode="updates"
+                Command(resume=value), config, stream_mode="updates"
             )
         ):
             yield ev
-        async for ev in _events_after_stream(graph, _config(session_id)):
+        async for ev in _events_after_stream(graph, config):
             yield ev
         question = (memory or {}).get("last_user_text") or ""
         await _save_turn(graph, session_id, api_key_hash, question, memory)

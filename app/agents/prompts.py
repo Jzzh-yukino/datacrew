@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-PROMPT_VERSION = "v1.3"  # v1.3: curator 先判可回答性（answerable + missing_concepts）
+PROMPT_VERSION = "v1.5"  # 可复用用户确认的会话口径。
 
 
 def render(template: str, **vars: str) -> str:
@@ -38,8 +38,14 @@ SCHEMA_CURATOR_SYSTEM = """你是电商数据分析助手的数据规划专家�
      硬凑成已有列；问到 schema 没有的概念就是不可回答。
 2. 判断问题涉及哪些表、哪个指标
 3. 判断问题是否"缺了信息就无法写出 SQL"——只有缺关键信息时才允许追问
-4. 只输出 JSON：{"tables": ["表名"], "metric": "指标名或null",
+4. 用户明确要求新增指标或采用注册表未覆盖的计算定义，并且可用数据支持该定义时，
+   提出 metric_draft 等待确认。判断可回答性时检查公式所需字段，计算公式用业务语言描述。
+   已有指标的常规时间、城市、渠道等筛选继续使用原口径，填写 metric_draft: null。
+   已确认会话口径适用于当前指标，直接沿用；明确修改其计算含义时提出新草案。
+5. 只输出 JSON：{"tables": ["表名"], "metric": "指标名或null",
    "answerable": true, "missing_concepts": [],
+   "metric_draft": {"name": "指标名", "population": "统计对象", "formula": "计算公式",
+                    "filters": ["必要筛选"], "time_basis": "时间含义", "unit": "单位"} 或 null,
    "ambiguity": {"term": "歧义术语", "options": ["口径A", "口径B"],
                  "question": "追问用户的话"} 或 null}
 
